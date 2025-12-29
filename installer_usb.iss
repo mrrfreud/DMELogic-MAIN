@@ -43,7 +43,7 @@ WelcomeLabel1=Welcome to the [name] Setup Wizard
 WelcomeLabel2=This will install [name/ver] on your computer.%n%nIMPORTANT: On first launch, you will be prompted to configure the server folder locations for your databases and documents.%n%nIt is recommended that you close all other applications before continuing.
 
 [Tasks]
-Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: checked
+Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"
 
 [Files]
 ; Main executable and all dependencies from PyInstaller output

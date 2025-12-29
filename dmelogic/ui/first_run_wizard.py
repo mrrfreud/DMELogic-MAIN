@@ -16,13 +16,17 @@ from PyQt6.QtGui import QFont, QPixmap
 
 
 def get_settings_path() -> Path:
-    """Get the path to settings.json in the app directory."""
-    # When running as exe, use the exe's directory
-    if getattr(os.sys, 'frozen', False):
-        app_dir = Path(os.sys.executable).parent
+    """Get the path to settings.json in a user-writable location."""
+    # Use %LOCALAPPDATA%\DMELogic for settings (user-writable, not Program Files)
+    if os.name == 'nt':  # Windows
+        local_appdata = os.environ.get('LOCALAPPDATA', os.path.expanduser('~'))
+        settings_dir = Path(local_appdata) / "DMELogic"
     else:
-        app_dir = Path(__file__).parent.parent.parent
-    return app_dir / "settings.json"
+        settings_dir = Path.home() / ".dmelogic"
+    
+    # Create directory if it doesn't exist
+    settings_dir.mkdir(parents=True, exist_ok=True)
+    return settings_dir / "settings.json"
 
 
 def is_first_run() -> bool:
@@ -134,6 +138,29 @@ class DatabaseFolderPage(QWizardPage):
         
         # Connect for validation
         self.db_folder_edit.textChanged.connect(self.validate_folder)
+    
+    def initializePage(self):
+        """Auto-detect existing database folder on page load."""
+        # Check common locations for existing databases
+        common_paths = [
+            r"C:\Dme_Solutions\Data",
+            r"C:\DME_Solutions\Data",
+            r"C:\DMELogic\Data",
+        ]
+        
+        for path in common_paths:
+            if os.path.isdir(path):
+                # Check if it contains database files
+                db_files = [f for f in os.listdir(path) if f.endswith('.db')]
+                if db_files:
+                    self.db_folder_edit.setText(path)
+                    self.status_label.setText(f"✓ Auto-detected! Found {len(db_files)} database(s)")
+                    self.status_label.setStyleSheet("color: green; font-weight: bold;")
+                    return
+        
+        # If no existing databases found, suggest default
+        if os.path.isdir(r"C:\Dme_Solutions\Data"):
+            self.db_folder_edit.setText(r"C:\Dme_Solutions\Data")
     
     def browse_db_folder(self):
         folder = QFileDialog.getExistingDirectory(
@@ -422,7 +449,8 @@ class FirstRunWizard(QWizard):
         
         # Update with new values
         settings['db_folder'] = self.field("db_folder")
-        settings['last_folder'] = self.field("fax_folder")
+        settings['fax_folder'] = self.field("fax_folder")  # Save as fax_folder for paths.py
+        settings['last_folder'] = self.field("fax_folder")  # Also keep last_folder for compatibility
         
         backup_folder = self.field("backup_folder")
         if backup_folder:
@@ -443,6 +471,10 @@ class FirstRunWizard(QWizard):
                 "reverse_refill", "export_portal", "generate_1500",
                 "print_1500", "delete_order", "link_patient"
             ]
+        
+        # Set default theme to Light for consistent appearance
+        if 'theme' not in settings:
+            settings['theme'] = 'Light'
         
         # Save settings
         settings_path = get_settings_path()

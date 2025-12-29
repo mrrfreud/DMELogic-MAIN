@@ -18,7 +18,19 @@ TESSERACT_PATHS = [
     r"tesseract",   # If in PATH
 ]
 
-SETTINGS_FILE = "settings.json"
+def _get_settings_file() -> str:
+    """Get the path to settings.json in a user-writable location."""
+    if os.name == 'nt':  # Windows
+        local_appdata = os.environ.get('LOCALAPPDATA', os.path.expanduser('~'))
+        settings_dir = os.path.join(local_appdata, "DMELogic")
+    else:
+        settings_dir = os.path.join(os.path.expanduser('~'), ".dmelogic")
+    
+    # Create directory if it doesn't exist
+    os.makedirs(settings_dir, exist_ok=True)
+    return os.path.join(settings_dir, "settings.json")
+
+SETTINGS_FILE = _get_settings_file()
 
 DEBUG_LOG_FILE = "print_debug.log"
 

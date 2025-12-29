@@ -95,7 +95,21 @@ def configure_tesseract():
     print("WARNING: Tesseract not found. OCR functionality will not work.")
     print("Please install Tesseract from: https://github.com/tesseract-ocr/tesseract")
     return False
-SETTINGS_FILE = "settings.json"
+
+# Use centralized settings path from dmelogic.config (user-writable LOCALAPPDATA)
+try:
+    from dmelogic.config import SETTINGS_FILE
+except ImportError:
+    # Fallback if running standalone
+    def _get_settings_file() -> str:
+        if os.name == 'nt':
+            local_appdata = os.environ.get('LOCALAPPDATA', os.path.expanduser('~'))
+            settings_dir = os.path.join(local_appdata, "DMELogic")
+        else:
+            settings_dir = os.path.join(os.path.expanduser('~'), ".dmelogic")
+        os.makedirs(settings_dir, exist_ok=True)
+        return os.path.join(settings_dir, "settings.json")
+    SETTINGS_FILE = _get_settings_file()
 
 # Centralized, user-writable default database folder
 def _default_db_folder() -> str:
@@ -1657,7 +1671,8 @@ class NewOrderDialog(QDialog):
         header_layout.addWidget(title_label)
         
         # Version display
-        version_label = QLabel("v1.0.20.66")
+        from dmelogic.version import APP_VERSION
+        version_label = QLabel(f"v{APP_VERSION}")
         version_label.setStyleSheet("font-size: 11px; color: #95a5a6; margin-left: 10px;")
         header_layout.addWidget(version_label)
         
@@ -7172,7 +7187,13 @@ class SearchWorker(QThread):
 class PDFViewer(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("DME Manager Pro v2.0 (Build 1.0.20.66) - Complete DME Software Solution")
+        # Use centralized version
+        try:
+            from dmelogic.version import APP_VERSION
+            version_str = APP_VERSION
+        except ImportError:
+            version_str = "2.0.20.133"
+        self.setWindowTitle(f"DMELogic v{version_str} - Complete DME Software Solution")
         self.setGeometry(100, 100, 1400, 900)
 
         # --- Load Settings ---
@@ -7209,7 +7230,10 @@ class PDFViewer(QMainWindow):
         self._reserved_rx_in_session = set()
         
         # --- OCR Indexer for instant search ---
-        self.ocr_indexer = OCRIndexer(r"C:\FaxManagerData\FaxManagerData\ocr_cache.db")
+        # Use fax folder from settings, fallback to default
+        fax_folder = self.settings.get("fax_folder") or self.settings.get("last_folder") or r"C:\FaxManagerData\FaxManagerData\Faxes OCR'd"
+        ocr_cache_folder = os.path.dirname(fax_folder) if fax_folder else r"C:\FaxManagerData\FaxManagerData"
+        self.ocr_indexer = OCRIndexer(os.path.join(ocr_cache_folder, "ocr_cache.db"))
         
         # --- OCR Folder Watcher for incremental updates ---
         self.ocr_watcher_thread = None
@@ -11318,39 +11342,21 @@ class PDFViewer(QMainWindow):
             field.blockSignals(False)
 
     def load_settings(self):
-        """Load settings from JSON file."""
+        """Load settings from JSON file. Does NOT create defaults - First-Run Wizard handles that."""
         try:
             if os.path.exists(SETTINGS_FILE):
                 with open(SETTINGS_FILE, 'r') as f:
                     settings = json.load(f)
                     if 'quick_folders' not in settings:
                         settings['quick_folders'] = []
-                    # Ensure db_folder key exists and is usable
-                    try:
-                        dbf = settings.get('db_folder')
-                        if not dbf or not isinstance(dbf, str) or not dbf.strip():
-                            dbf = _default_db_folder()
-                            settings['db_folder'] = dbf
-                        else:
-                            os.makedirs(dbf, exist_ok=True)
-                    except Exception:
-                        try:
-                            settings['db_folder'] = _default_db_folder()
-                        except Exception:
-                            pass
                     return settings
         except Exception as e:
             print(f"Error loading settings: {e}")
         
-        # Defaults when no settings.json exists
-        try:
-            df = _default_db_folder()
-        except Exception:
-            df = ''
+        # Return minimal defaults - do NOT create db_folder (First-Run Wizard handles that)
         return {
             "last_folder": DEFAULT_FOLDER_PATH,
-            "quick_folders": [],
-            "db_folder": df
+            "quick_folders": []
         }
 
     def save_settings(self):
@@ -14056,6 +14062,10 @@ class PDFViewer(QMainWindow):
         about_action.triggered.connect(self.show_about)
         help_menu.addAction(about_action)
         
+        check_updates_action = QAction('Check for Updates...', self)
+        check_updates_action.triggered.connect(self.check_for_updates_manual)
+        help_menu.addAction(check_updates_action)
+        
         help_menu.addSeparator()
         
         uninstall_action = QAction('Uninstall Application...', self)
@@ -14484,34 +14494,50 @@ class PDFViewer(QMainWindow):
 
     def show_about(self):
         """Show about dialog."""
-        QMessageBox.about(self, "About Document Manager", 
-                         "Document Manager v1.0\n\n"
-                         "A simple PDF viewer and document manager\n"
-                         "with note-taking capabilities.\n\n"
+        from dmelogic.version import APP_VERSION
+        QMessageBox.about(self, "About DMELogic", 
+                         f"DMELogic v{APP_VERSION}\n\n"
+                         "A comprehensive DME billing and order management system\n"
+                         "with document management capabilities.\n\n"
                          "Features:\n"
-                         "• Multi-page PDF viewing\n"
-                         "• Dark mode interface\n"
-                         "• Document notes and metadata\n"
-                         "• Print functionality\n"
-                         "• Smooth scrolling and zooming\n"
-                         "• Quick folder access\n"
-                         "• Persistent settings\n\n"
-                         "Controls:\n"
-                         "• Mouse wheel: Scroll\n"
-                         "• Ctrl + Mouse wheel: Zoom\n"
-                         "• Page Up/Down: Navigate pages\n\n"
-                         "© 2025")
+                         "• Patient & order management\n"
+                         "• PDF document viewing\n"
+                         "• OCR document indexing\n"
+                         "• Insurance billing support\n"
+                         "• Inventory tracking\n"
+                         "• Reporting & analytics\n\n"
+                         "© 2025 DME Solutions")
+    
+    def check_for_updates_manual(self):
+        """Manually check for application updates."""
+        from dmelogic.update_checker import check_for_updates
+        from dmelogic.ui.update_dialog import show_update_dialog, show_no_updates_dialog
+        from PyQt6.QtWidgets import QApplication
+        
+        # Show busy cursor during check
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        
+        try:
+            update_info = check_for_updates()
+        finally:
+            QApplication.restoreOverrideCursor()
+        
+        if update_info:
+            show_update_dialog(update_info, self)
+        else:
+            show_no_updates_dialog(self)
     
     def uninstall_application(self):
         """Launch the Windows uninstaller for this application."""
         try:
             import winreg
+            import shutil
             
             # Confirm with user
             reply = QMessageBox.question(
                 self,
                 'Uninstall Application',
-                'This will open the Windows uninstaller for DME Solutions v1.\n\n'
+                'This will open the Windows uninstaller for DMELogic.\n\n'
                 'Your data files (patients, orders, etc.) will NOT be deleted.\n'
                 'You can back them up using File → Backup before uninstalling.\n\n'
                 'Do you want to continue?',
@@ -14522,9 +14548,20 @@ class PDFViewer(QMainWindow):
             if reply == QMessageBox.StandardButton.No:
                 return
             
+            # Clean up LocalAppData settings
+            try:
+                local_appdata = os.environ.get('LOCALAPPDATA', '')
+                if local_appdata:
+                    settings_dir = os.path.join(local_appdata, 'DMELogic')
+                    if os.path.exists(settings_dir):
+                        shutil.rmtree(settings_dir, ignore_errors=True)
+                        print(f"Cleaned up settings folder: {settings_dir}")
+            except Exception as e:
+                print(f"Could not clean up settings: {e}")
+            
             # Try to find the uninstaller in registry
             uninstall_path = None
-            app_name = "DME Solutions v1"
+            app_name = "DMELogic"
             
             # Search in both HKLM and HKCU uninstall keys
             registry_paths = [
@@ -14580,7 +14617,7 @@ class PDFViewer(QMainWindow):
                     'To uninstall manually:\n'
                     '1. Open Windows Settings (Win + I)\n'
                     '2. Go to Apps → Installed Apps\n'
-                    '3. Search for "DME Solutions v1"\n'
+                    '3. Search for "DMELogic"\n'
                     '4. Click the three dots and select "Uninstall"'
                 )
                 
@@ -14921,21 +14958,17 @@ class PDFViewer(QMainWindow):
         return None
 
     def resolve_db_path(self, filename: str) -> str:
-        """Resolve a stable path for core databases with a user-writable preference.
+        """Resolve a stable path for core databases with settings db_folder as PRIORITY.
 
         Strategy:
-        - If settings['db_folder'] is set: ensure it exists and prefer storing the DB there.
-          If an existing DB is found elsewhere (app root, folder_path, parent, cwd), copy the
-          largest existing file into db_folder (if newer/larger) and then use that path.
-        - Otherwise, pick the largest existing DB among common locations.
-        - If nothing exists yet, create in db_folder if defined, else app root.
+        - FIRST: If settings['db_folder'] is set and exists, use that path.
+        - If DB doesn't exist there yet, check if it exists elsewhere and copy it.
+        - If nothing exists anywhere, create in db_folder.
         """
         try:
             app_root = os.path.dirname(os.path.abspath(__file__))
-            # Candidates to search for an existing DB
-            existing = self.find_existing_db(filename)
-
-            # Preferred destination directory
+            
+            # PRIORITY: Use settings db_folder if configured
             db_folder = None
             try:
                 if isinstance(getattr(self, 'settings', {}), dict):
@@ -14943,31 +14976,27 @@ class PDFViewer(QMainWindow):
             except Exception:
                 db_folder = None
 
-            # If we have a configured db_folder, ensure it exists
+            # If we have a configured db_folder, USE IT
             if db_folder and isinstance(db_folder, str) and db_folder.strip():
                 try:
                     os.makedirs(db_folder, exist_ok=True)
                 except Exception:
                     pass
                 dest_path = os.path.join(db_folder, filename)
-
-                # If an existing DB was found elsewhere and the dest does NOT exist, copy it over.
-                # Do NOT overwrite an existing destination file even if smaller; respect user's data (can be intentionally empty).
-                try:
-                    if not os.path.exists(dest_path) and existing and os.path.abspath(existing) != os.path.abspath(dest_path):
+                
+                # If DB doesn't exist at destination, check if it exists elsewhere to copy
+                if not os.path.exists(dest_path):
+                    existing = self.find_existing_db(filename)
+                    if existing and os.path.abspath(existing) != os.path.abspath(dest_path):
                         try:
                             shutil.copy2(existing, dest_path)
                         except Exception:
-                            # If copy fails, fall back to using the existing file in place
-                            return existing
-                    return dest_path
-                    # No existing file found: use db_folder destination
-                    return dest_path
-                except Exception:
-                    # On error, fall back to existing or app root
-                    return existing or os.path.join(app_root, filename)
+                            pass
+                
+                return dest_path
 
-            # No db_folder configured: use the largest existing or app root as last resort
+            # No db_folder configured: search for existing or use app root
+            existing = self.find_existing_db(filename)
             return existing or os.path.join(app_root, filename)
         except Exception:
             # Fallback to folder_path on error

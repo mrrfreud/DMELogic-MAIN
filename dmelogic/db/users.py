@@ -23,9 +23,6 @@ except ImportError:
     print("[WARNING] argon2-cffi not installed. Run: pip install argon2-cffi")
 
 
-# Default data folder (same as other DBs)
-DEFAULT_DATA_FOLDER = r"C:\Dme_Solutions\Data"
-
 # Password hasher instance
 _password_hasher = PasswordHasher() if ARGON2_AVAILABLE else None
 
@@ -138,8 +135,17 @@ DEFAULT_ROLES = {
 # =============================================================================
 
 def get_users_db_path(folder_path: Optional[str] = None) -> str:
-    """Get the path to users.db"""
-    folder = folder_path or DEFAULT_DATA_FOLDER
+    """Get the path to users.db using centralized db_dir() or provided folder."""
+    if folder_path:
+        folder = folder_path
+    else:
+        # Use centralized path resolution
+        try:
+            from dmelogic.paths import db_dir
+            folder = str(db_dir())
+        except Exception:
+            # Fallback to default
+            folder = r"C:\Dme_Solutions\Data"
     Path(folder).mkdir(parents=True, exist_ok=True)
     return os.path.join(folder, "users.db")
 

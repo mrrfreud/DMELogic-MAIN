@@ -21,6 +21,7 @@ from dmelogic.db.migrations import run_all_migrations
 from dmelogic.security.auth import login, get_session
 from dmelogic.ui.login_dialog import LoginDialog
 from dmelogic.ui.first_run_wizard import run_first_run_wizard_if_needed, is_first_run
+from dmelogic.version import APP_VERSION
 
 
 def _ensure_venv():
@@ -173,10 +174,63 @@ def main():
     win.show()
     logging.info("Application started successfully.")
     
+    # Check for updates in background after main window is shown
+    _check_for_updates_async(win)
+    
     # Show unbilled orders reminder after main window is shown
     _show_unbilled_orders_reminder(win)
 
     sys.exit(app.exec())
+
+
+def _check_for_updates_async(win) -> None:
+    """
+    Check for application updates in the background.
+    Shows update dialog if a newer version is available.
+    """
+    from PyQt6.QtCore import QTimer
+    from dmelogic.update_checker import (
+        check_for_updates_async, should_check_for_updates,
+        get_skipped_version, set_last_update_check
+    )
+    from dmelogic.ui.update_dialog import show_update_dialog
+    from datetime import datetime
+    
+    logger = logging.getLogger("updates")
+    
+    if not should_check_for_updates():
+        logger.info("Skipping update check (checked recently)")
+        return
+    
+    def handle_update_result(update_info):
+        """Called when update check completes."""
+        # Record the check time
+        set_last_update_check(datetime.now().isoformat())
+        
+        if update_info is None:
+            logger.info("No updates available")
+            return
+        
+        # Check if this version was skipped by user
+        skipped = get_skipped_version()
+        if skipped and skipped == update_info.version:
+            logger.info(f"Update {update_info.version} was skipped by user")
+            return
+        
+        logger.info(f"Update available: {update_info.version}")
+        
+        # Show dialog on main thread using QTimer
+        def show_dialog():
+            try:
+                show_update_dialog(update_info, win)
+            except Exception as e:
+                logger.error(f"Failed to show update dialog: {e}")
+        
+        QTimer.singleShot(0, show_dialog)
+    
+    # Start async check
+    logger.info("Checking for updates...")
+    check_for_updates_async(handle_update_result)
 
 
 def _show_unbilled_orders_reminder(win) -> None:

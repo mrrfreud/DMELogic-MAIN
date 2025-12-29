@@ -25,13 +25,28 @@ def get_project_root() -> Path:
     return Path(__file__).resolve().parents[1]
 
 
+def _get_internal_dir() -> Path:
+    """Get the _internal directory for PyInstaller bundled data."""
+    if getattr(sys, 'frozen', False):
+        # PyInstaller stores data files in _internal subfolder (or MEIPASS for onefile)
+        if hasattr(sys, '_MEIPASS'):
+            return Path(sys._MEIPASS)
+        return Path(sys.executable).resolve().parent / "_internal"
+    # dev mode: use project root
+    return Path(__file__).resolve().parents[1]
+
+
 def get_assets_dir() -> Path:
     """Get assets directory (works in dev and frozen modes)."""
+    if getattr(sys, 'frozen', False):
+        return _get_internal_dir() / "assets"
     return get_project_root() / "assets"
 
 
 def get_theme_dir() -> Path:
     """Get theme directory (works in dev and frozen modes)."""
+    if getattr(sys, 'frozen', False):
+        return _get_internal_dir() / "theme"
     return get_project_root() / "theme"
 
 
@@ -101,16 +116,43 @@ def db_dir() -> Path:
 
 
 def backup_dir() -> Path:
-    """Backups folder."""
+    """
+    Backups folder with priority:
+    1. Settings.json backup_folder
+    2. Default backup folder
+    """
+    try:
+        from .settings import load_settings
+        settings = load_settings()
+        backup_folder = settings.get("backup_folder")
+        if backup_folder:
+            p = Path(backup_folder)
+            p.mkdir(parents=True, exist_ok=True)
+            return p
+    except Exception:
+        pass
     return Path(_default_backup_folder())
 
 
 def fax_root() -> Path:
     """
-    Root for fax-related data.
-    Adjust this if your real fax root is different.
+    Root for fax-related data with priority:
+    1. Settings.json fax_folder (parent of fax folder)
+    2. Default fax root
     """
-    # Example: C:\FaxManagerData
+    try:
+        from .settings import load_settings
+        settings = load_settings()
+        fax_folder = settings.get("fax_folder")
+        if fax_folder:
+            # fax_folder might be the OCR'd folder or root
+            p = Path(fax_folder)
+            # If it ends with something like "Faxes OCR'd", use parent as root
+            if p.name.lower() in ("faxes ocr'd", "faxes ocred", "faxes"):
+                return p.parent
+            return p
+    except Exception:
+        pass
     return Path(r"C:\FaxManagerData")
 
 

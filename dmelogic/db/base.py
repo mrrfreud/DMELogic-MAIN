@@ -63,6 +63,7 @@ def find_existing_db(filename: str, folder_path: Optional[str] = None) -> Option
       - App root (next to app.py)
       - Current folder_path (user's fax folder) if provided
       - db_folder from settings.json
+      - Default DME data folder (C:\\Dme_Solutions\\Data)
       - Parent of folder_path (if provided)
       - Current working directory
     """
@@ -85,6 +86,11 @@ def find_existing_db(filename: str, folder_path: Optional[str] = None) -> Option
 
         if db_folder:
             paths.append(os.path.join(db_folder, filename))
+
+        # Default DME data folder - check this even if not in settings
+        default_dme_folder = r"C:\Dme_Solutions\Data"
+        if os.path.isdir(default_dme_folder):
+            paths.append(os.path.join(default_dme_folder, filename))
 
         try:
             parent = os.path.dirname(base_folder)

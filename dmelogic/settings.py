@@ -12,9 +12,15 @@ from .config import SETTINGS_FILE, _default_db_folder, debug_log
 _SETTINGS_CACHE: Optional[dict] = None
 
 
-def load_settings() -> dict:
+def load_settings(create_if_missing: bool = False) -> dict:
     """
-    Load settings.json or create defaults.
+    Load settings.json.
+    
+    Args:
+        create_if_missing: If True, create default settings if file doesn't exist.
+                          If False (default), return empty dict if file doesn't exist.
+                          The First-Run Wizard should handle initial setup.
+    
     Cached in memory after first read for performance.
     """
     global _SETTINGS_CACHE
@@ -23,16 +29,19 @@ def load_settings() -> dict:
     if _SETTINGS_CACHE is not None:
         return _SETTINGS_CACHE
     
-    # Load from disk or create defaults
+    # Load from disk
     if not os.path.exists(SETTINGS_FILE):
-        settings = {
-            "db_folder": _default_db_folder(),
-            "last_open_folder": "",
-            "fee_schedule_path": "",
-            "theme": "light"
-        }
-        save_settings(settings)
-        return settings
+        if create_if_missing:
+            settings = {
+                "db_folder": _default_db_folder(),
+                "last_open_folder": "",
+                "fee_schedule_path": "",
+                "theme": "light"
+            }
+            save_settings(settings)
+            return settings
+        # Don't auto-create - let First-Run Wizard handle it
+        return {}
 
     try:
         with open(SETTINGS_FILE, "r", encoding="utf-8") as f:
