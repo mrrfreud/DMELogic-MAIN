@@ -1,0 +1,167 @@
+"""
+paths.py — Centralized path management for DMELogic
+"""
+
+from __future__ import annotations
+
+import logging
+import os
+import sys
+from pathlib import Path
+
+from .config import _default_db_folder, _default_backup_folder, DEBUG_LOG_FILE
+
+
+# ---- base project dir ----
+PROJECT_ROOT = Path(__file__).resolve().parents[1]  # dmelogic/ → project root
+
+
+def get_project_root() -> Path:
+    """Return the project root in both dev and frozen (PyInstaller) modes."""
+    if getattr(sys, 'frozen', False):
+        # When frozen, base is the folder where the EXE resides
+        return Path(sys.executable).resolve().parent
+    # dev mode: same as existing PROJECT_ROOT behavior
+    return Path(__file__).resolve().parents[1]
+
+
+def get_assets_dir() -> Path:
+    """Get assets directory (works in dev and frozen modes)."""
+    return get_project_root() / "assets"
+
+
+def get_theme_dir() -> Path:
+    """Get theme directory (works in dev and frozen modes)."""
+    return get_project_root() / "theme"
+
+
+def get_logs_dir() -> Path:
+    """Ensure logs folder exists and return it (in a writable location)."""
+    if getattr(sys, 'frozen', False):
+        # When frozen (installed), use ProgramData which is writable
+        logs = Path(os.getenv('PROGRAMDATA', 'C:\\ProgramData')) / "DMELogic" / "Logs"
+    else:
+        # In dev mode, use project root
+        logs = get_project_root() / "Logs"
+    
+    logs.mkdir(parents=True, exist_ok=True)
+    return logs
+
+
+def _get_installed_data_path() -> Path | None:
+    """
+    Check if running from an installed version and read data_path.txt.
+    This ensures installed apps use the correct data directory.
+    """
+    try:
+        # Check if we're running as a frozen executable (PyInstaller)
+        if getattr(sys, 'frozen', False):
+            # Get the directory where the .exe is located
+            exe_dir = Path(sys.executable).parent
+            data_path_file = exe_dir / "data_path.txt"
+            
+            if data_path_file.exists():
+                path_str = data_path_file.read_text(encoding="utf-8").strip()
+                if path_str:
+                    p = Path(path_str)
+                    p.mkdir(parents=True, exist_ok=True)
+                    return p
+    except Exception:
+        pass
+    return None
+
+
+# ---- core dirs (under your existing structure) ----
+def db_dir() -> Path:
+    """
+    Central DB folder with priority:
+    1. Installed app data path (from data_path.txt)
+    2. Settings.json db_folder
+    3. Default db folder
+    """
+    # First check if this is an installed app
+    installed_path = _get_installed_data_path()
+    if installed_path:
+        return installed_path
+    
+    # Then check settings
+    try:
+        from .settings import load_settings
+        settings = load_settings()
+        db_folder = settings.get("db_folder")
+        if db_folder:
+            p = Path(db_folder)
+            p.mkdir(parents=True, exist_ok=True)
+            return p
+    except Exception:
+        pass
+    
+    # Finally fall back to default
+    return Path(_default_db_folder())
+
+
+def backup_dir() -> Path:
+    """Backups folder."""
+    return Path(_default_backup_folder())
+
+
+def fax_root() -> Path:
+    """
+    Root for fax-related data.
+    Adjust this if your real fax root is different.
+    """
+    # Example: C:\FaxManagerData
+    return Path(r"C:\FaxManagerData")
+
+
+def fax_packets_dir() -> Path:
+    return fax_root() / "FaxPackets"
+
+
+def patient_documents_dir() -> Path:
+    return fax_root() / "PatientDocuments"
+
+
+def tickets_dir() -> Path:
+    return fax_root() / "Tickets"
+
+
+# ---- DME-specific directories ----
+def pod_dir() -> Path:
+    """Proof of Delivery documents."""
+    p = fax_root() / "POD"
+    p.mkdir(parents=True, exist_ok=True)
+    return p
+
+
+def cmn_dir() -> Path:
+    """Certificate of Medical Necessity forms."""
+    p = fax_root() / "CMN"
+    p.mkdir(parents=True, exist_ok=True)
+    return p
+
+
+def hcfa_1500_exports_dir() -> Path:
+    """HCFA-1500 form exports."""
+    p = PROJECT_ROOT / "Exports" / "HCFA-1500"
+    p.mkdir(parents=True, exist_ok=True)
+    return p
+
+
+def ub04_exports_dir() -> Path:
+    """UB-04 form exports."""
+    p = PROJECT_ROOT / "Exports" / "UB-04"
+    p.mkdir(parents=True, exist_ok=True)
+    return p
+
+
+def logs_dir() -> Path:
+    """Centralized logs directory."""
+    p = PROJECT_ROOT / "Logs"
+    p.mkdir(parents=True, exist_ok=True)
+    return p
+
+
+def debug_log_path() -> Path:
+    """Path to debug log file in centralized Logs directory."""
+    return logs_dir() / DEBUG_LOG_FILE

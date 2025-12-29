@@ -1,0 +1,54 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+
+# Distribution / packaging
+build/
+dist/
+*.egg-info/
+*.egg
+
+# PyInstaller
+*.spec
+
+# Database files (may contain sensitive data)
+*.db
+*.sqlite
+*.sqlite3
+
+# Logs
+*.log
+Logs/
+
+# IDE
+.vscode/
+.idea/
+
+# pytest
+.pytest_cache/
+
+# Local settings (may contain sensitive info)
+settings.json
+
+# Backup/restore points
+restore_point_*/
+
+# Installer outputs
+installer_output/
+installer_data/
+
+# Exports (may contain PHI/sensitive data)
+Exports/
+
+# OCR failures log
+ocr_failures.log
+
+# OS files
+Thumbs.db
+.DS_Store
