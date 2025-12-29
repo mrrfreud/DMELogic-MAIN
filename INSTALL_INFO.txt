@@ -1,0 +1,42 @@
+=====================================================
+           DMELogic Installation Information
+=====================================================
+
+Thank you for choosing DMELogic for your DME billing 
+and order management needs.
+
+FIRST-TIME SETUP
+----------------
+When you launch DMELogic for the first time, a setup 
+wizard will appear asking you to configure your 
+server folder locations:
+
+  1. Database Folder - Where patient/order data is stored
+  2. Fax Documents Folder - Where scanned documents live
+  3. Backup Folder - Where backups are saved
+
+These folders are typically on your office server so 
+all workstations can access the same data.
+
+NETWORK SETUP (Multiple Computers)
+----------------------------------
+If multiple computers will use DMELogic:
+
+  - All computers should point to the SAME database 
+    folder on your server
+  - Use UNC paths like: \\SERVER\SharedFolder\DMEData
+
+SYSTEM REQUIREMENTS
+-------------------
+  - Windows 10 or Windows 11
+  - 4 GB RAM minimum (8 GB recommended)
+  - 500 MB free disk space
+  - Network access to shared data folders
+
+SUPPORT
+-------
+For technical support, please contact your 
+system administrator or visit:
+https://github.com/mrrfreud/DMELogic-Refactored
+
+=====================================================

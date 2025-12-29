@@ -20,6 +20,7 @@ from dmelogic.db.users import init_users_db
 from dmelogic.db.migrations import run_all_migrations
 from dmelogic.security.auth import login, get_session
 from dmelogic.ui.login_dialog import LoginDialog
+from dmelogic.ui.first_run_wizard import run_first_run_wizard_if_needed, is_first_run
 
 
 def _ensure_venv():
@@ -94,6 +95,20 @@ def main():
     # Setup logging first
     setup_logging()
     
+    logging.info("Creating QApplication...")
+    app = QApplication(sys.argv)
+    
+    # Apply theme (default to light theme)
+    apply_theme(app, "light")
+    
+    # --- First Run Wizard: Check if setup is needed ---
+    if is_first_run():
+        logging.info("First run detected - showing setup wizard...")
+        if not run_first_run_wizard_if_needed(app):
+            logging.info("Setup wizard cancelled. Exiting application.")
+            sys.exit(0)
+        logging.info("Setup wizard completed successfully.")
+    
     # Initialize user authentication database
     logging.info("Initializing authentication system...")
     try:
@@ -115,12 +130,6 @@ def main():
     # Configure OCR system and check status
     logging.info("Configuring OCR system...")
     ocr_status = ensure_ocr_configured()
-
-    logging.info("Creating QApplication...")
-    app = QApplication(sys.argv)
-    
-    # Apply theme (default to light theme)
-    apply_theme(app, "light")
     
     # --- Authentication: Show login dialog before main window ---
     logging.info("Showing login dialog...")
