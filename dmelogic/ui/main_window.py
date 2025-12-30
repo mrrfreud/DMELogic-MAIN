@@ -7,12 +7,15 @@ Later we can move logic out of app_legacy.PDFViewer into here,
 step by step, without breaking the app.
 """
 
-from typing import Type
+from typing import Type, Iterable
 from decimal import Decimal
+import os
+import sys
+import subprocess
 from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
     QLineEdit, QComboBox, QLabel, QPushButton, 
-    QFrame, QSizePolicy, QDialog, QMessageBox, QTableWidget, QToolBar, QApplication
+    QFrame, QSizePolicy, QDialog, QMessageBox, QTableWidget, QToolBar, QApplication, QFileDialog
 )
 from PyQt6.QtGui import QIcon, QAction
 from PyQt6.QtCore import QSize, Qt
@@ -347,6 +350,249 @@ class MainWindow(PDFViewer):
         # Setup theme switching menu
         self._setup_theme_menu()
         self._setup_tools_menu()
+        self._setup_help_menu()
+
+    def _get_or_create_menu(self, title_candidates: Iterable[str], fallback_title: str):
+        """Return an existing menu matching one of the given titles, else create it."""
+        menubar = self.menuBar()
+
+        for act in menubar.actions():
+            menu = act.menu()
+            if not menu:
+                continue
+            normalized = menu.title().replace("&&", "&")
+            if normalized in title_candidates:
+                return menu
+
+        return menubar.addMenu(fallback_title)
+
+    @staticmethod
+    def _menu_has_action(menu, text: str) -> bool:
+        for act in menu.actions():
+            if act.text().replace("&&", "&") == text.replace("&&", "&"):
+                return True
+        return False
+
+    def _setup_help_menu(self) -> None:
+        """Add Help menu actions shared by installed + USB builds."""
+        help_menu = self._get_or_create_menu(("&Help", "Help"), "&Help")
+
+        # Add a separator if the help menu already has items.
+        if help_menu.actions() and not help_menu.actions()[-1].isSeparator():
+            help_menu.addSeparator()
+
+        if not self._menu_has_action(help_menu, "Update from File..."):
+            self.action_update_from_file = QAction("Update from File...", self)
+            self.action_update_from_file.setToolTip("Run an update installer from a file")
+            self.action_update_from_file.triggered.connect(self._update_from_file)
+            help_menu.addAction(self.action_update_from_file)
+
+        if not self._menu_has_action(help_menu, "Uninstall Application..."):
+            self.action_uninstall_app = QAction("Uninstall Application...", self)
+            self.action_uninstall_app.setToolTip("Open the Windows uninstaller for DMELogic")
+            self.action_uninstall_app.triggered.connect(self._uninstall_application)
+            help_menu.addAction(self.action_uninstall_app)
+
+    def _update_from_file(self) -> None:
+        if sys.platform != "win32":
+            QMessageBox.information(self, "Update", "Update from file is only supported on Windows.")
+            return
+
+        start_dir = str(Path.home())
+        try:
+            if getattr(sys, "frozen", False):
+                start_dir = str(Path(sys.executable).resolve().parent)
+        except Exception:
+            pass
+
+        file_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Select Update Installer",
+            start_dir,
+            "Installer (*.exe)"
+        )
+        if not file_path:
+            return
+
+        file_path = os.path.abspath(file_path)
+        if not os.path.exists(file_path):
+            QMessageBox.warning(self, "Update", "Selected installer file was not found.")
+            return
+
+        resp = QMessageBox.question(
+            self,
+            "Update",
+            "This will launch the selected installer and close DMELogic. Continue?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.Yes,
+        )
+        if resp != QMessageBox.StandardButton.Yes:
+            return
+
+        try:
+            self._launch_windows_exe(file_path)
+        except Exception as e:
+            QMessageBox.critical(self, "Update", f"Could not launch installer:\n\n{e}")
+            return
+
+        # Exit so files can be replaced during update.
+        QApplication.quit()
+
+    def _uninstall_application(self) -> None:
+        if sys.platform != "win32":
+            QMessageBox.information(self, "Uninstall", "Uninstall is only supported on Windows.")
+            return
+
+        resp = QMessageBox.question(
+            self,
+            "Uninstall Application",
+            "This will launch the DMELogic uninstaller.\n\n"
+            "It is recommended to run a backup first (File → Backup).\n\n"
+            "Continue?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if resp != QMessageBox.StandardButton.Yes:
+            return
+
+        uninstaller = self._find_uninstaller_path()
+        if uninstaller is None:
+            QMessageBox.information(
+                self,
+                "Uninstall",
+                "Could not find the automatic uninstaller.\n\n"
+                "To uninstall manually:\n"
+                "1) Open Windows Settings\n"
+                "2) Apps → Installed apps\n"
+                "3) Search for 'DMELogic'\n"
+                "4) Click Uninstall",
+            )
+            return
+
+        try:
+            # Inno Setup uninstallers are normal EXEs. Launch detached.
+            self._launch_windows_exe(str(uninstaller))
+        except Exception as e:
+            QMessageBox.critical(
+                self,
+                "Uninstall",
+                f"Could not launch uninstaller:\n\n{e}\n\n"
+                "To uninstall manually, use Windows Settings → Apps → Installed apps.",
+            )
+            return
+
+        QMessageBox.information(
+            self,
+            "Uninstall",
+            "The uninstaller has been launched.\n\n"
+            "DMELogic will now close.",
+        )
+        QApplication.quit()
+
+    def _find_uninstaller_path(self) -> Path | None:
+        """Try to locate the Inno Setup uninstaller for this app."""
+        # 1) If frozen, the uninstaller is usually next to the EXE.
+        try:
+            if getattr(sys, "frozen", False):
+                install_dir = Path(sys.executable).resolve().parent
+                matches = sorted(install_dir.glob("unins*.exe"))
+                if matches:
+                    return matches[0]
+        except Exception:
+            pass
+
+        # 2) Look in registry uninstall entries.
+        try:
+            import winreg
+
+            app_id = "{8F3D5E2A-9B4C-4F1A-8D2E-5C6F7A8B9D0E}"
+            display_names = {"DMELogic", "DME Logic"}
+
+            roots = [
+                winreg.HKEY_LOCAL_MACHINE,
+                winreg.HKEY_CURRENT_USER,
+            ]
+            key_paths = [
+                r"SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall",
+                r"SOFTWARE\\WOW6432Node\\Microsoft\\Windows\\CurrentVersion\\Uninstall",
+            ]
+
+            for root in roots:
+                for base in key_paths:
+                    try:
+                        with winreg.OpenKey(root, base) as uninstall_key:
+                            i = 0
+                            while True:
+                                try:
+                                    subkey_name = winreg.EnumKey(uninstall_key, i)
+                                except OSError:
+                                    break
+                                i += 1
+
+                                try:
+                                    with winreg.OpenKey(uninstall_key, subkey_name) as subkey:
+                                        try:
+                                            display = winreg.QueryValueEx(subkey, "DisplayName")[0]
+                                        except OSError:
+                                            display = ""
+
+                                        if subkey_name.lower() in {f"{app_id}_is1".lower(), app_id.lower()}:
+                                            pass_match = True
+                                        else:
+                                            pass_match = any(n.lower() in (display or "").lower() for n in display_names)
+
+                                        if not pass_match:
+                                            continue
+
+                                        try:
+                                            uninstall_str = winreg.QueryValueEx(subkey, "UninstallString")[0]
+                                        except OSError:
+                                            uninstall_str = ""
+
+                                        if not uninstall_str:
+                                            continue
+
+                                        # UninstallString can be quoted and/or include args.
+                                        # Prefer to extract an unins*.exe path if present.
+                                        candidate = uninstall_str.strip().strip('"')
+                                        if (
+                                            "unins" in candidate.lower()
+                                            and candidate.lower().endswith(".exe")
+                                            and os.path.exists(candidate)
+                                        ):
+                                            return Path(candidate)
+
+                                        # Otherwise, return the first token if it exists.
+                                        first = candidate.split(" ", 1)[0].strip('"')
+                                        if first and os.path.exists(first):
+                                            return Path(first)
+                                except OSError:
+                                    continue
+                    except OSError:
+                        continue
+        except Exception:
+            pass
+
+        return None
+
+    @staticmethod
+    def _launch_windows_exe(exe_path: str) -> None:
+        """Launch an EXE detached on Windows (with UAC prompt if required by the EXE)."""
+        exe_path = os.path.abspath(exe_path)
+        if not os.path.exists(exe_path):
+            raise FileNotFoundError(exe_path)
+
+        # Prefer ShellExecute so Windows handles UAC correctly.
+        try:
+            import ctypes
+
+            r = ctypes.windll.shell32.ShellExecuteW(None, "open", exe_path, None, None, 1)
+            if r <= 32:
+                raise OSError(f"ShellExecuteW failed with code {r}")
+            return
+        except Exception:
+            # Fallback.
+            subprocess.Popen([exe_path], close_fds=True)
     
     def _setup_theme_menu(self):
         """Add View menu with theme switching options."""

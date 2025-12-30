@@ -30,20 +30,35 @@ def get_settings_path() -> Path:
 
 
 def is_first_run() -> bool:
-    """Check if this is the first run (no settings.json or missing required paths)."""
+    """Check if this is the first run (no settings.json, setup not completed, or missing required paths)."""
     settings_path = get_settings_path()
     if not settings_path.exists():
         return True
     
     try:
-        with open(settings_path, 'r') as f:
+        with open(settings_path, 'r', encoding='utf-8') as f:
             settings = json.load(f)
+
+        # Require explicit completion flag so new installs always see the wizard once.
+        if not settings.get('setup_completed', False):
+            return True
+
         # Check if required paths are configured
         db_folder = settings.get('db_folder', '')
         if not db_folder or not Path(db_folder).exists():
             return True
+
+        fax_folder = settings.get('fax_folder', '') or settings.get('last_folder', '')
+        if not fax_folder or not Path(fax_folder).exists():
+            return True
+
+        # Backups are strongly recommended; if configured, ensure the path exists.
+        backup_folder = settings.get('backup_folder', '')
+        if backup_folder and (not Path(backup_folder).exists()):
+            return True
+
         return False
-    except:
+    except Exception:
         return True
 
 
@@ -52,9 +67,9 @@ def load_existing_settings() -> dict:
     settings_path = get_settings_path()
     if settings_path.exists():
         try:
-            with open(settings_path, 'r') as f:
+            with open(settings_path, 'r', encoding='utf-8') as f:
                 return json.load(f)
-        except:
+        except Exception:
             pass
     return {}
 
@@ -115,7 +130,8 @@ class DatabaseFolderPage(QWizardPage):
         
         self.db_folder_edit = QLineEdit()
         self.db_folder_edit.setPlaceholderText("Select or enter the database folder path...")
-        self.registerField("db_folder*", self.db_folder_edit)
+        # Explicitly specify property + change signal so the Next button updates reliably.
+        self.registerField("db_folder*", self.db_folder_edit, "text", self.db_folder_edit.textChanged)
         group_layout.addWidget(self.db_folder_edit)
         
         browse_btn = QPushButton("Browse...")
@@ -146,6 +162,7 @@ class DatabaseFolderPage(QWizardPage):
             r"C:\Dme_Solutions\Data",
             r"C:\DME_Solutions\Data",
             r"C:\DMELogic\Data",
+            r"C:\ProgramData\DMELogic\Data",
         ]
         
         for path in common_paths:
@@ -240,7 +257,8 @@ class FaxFolderPage(QWizardPage):
         
         self.fax_folder_edit = QLineEdit()
         self.fax_folder_edit.setPlaceholderText("Select or enter the fax documents folder path...")
-        self.registerField("fax_folder*", self.fax_folder_edit)
+        # Explicitly specify property + change signal so the Next button updates reliably.
+        self.registerField("fax_folder*", self.fax_folder_edit, "text", self.fax_folder_edit.textChanged)
         group_layout.addWidget(self.fax_folder_edit)
         
         browse_btn = QPushButton("Browse...")
@@ -475,11 +493,14 @@ class FirstRunWizard(QWizard):
         # Set default theme to Light for consistent appearance
         if 'theme' not in settings:
             settings['theme'] = 'Light'
+
+        # Mark setup as completed so we don't prompt every launch.
+        settings['setup_completed'] = True
         
         # Save settings
         settings_path = get_settings_path()
         try:
-            with open(settings_path, 'w') as f:
+            with open(settings_path, 'w', encoding='utf-8') as f:
                 json.dump(settings, f, indent=2)
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Could not save settings:\n{e}")

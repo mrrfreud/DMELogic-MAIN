@@ -114,10 +114,13 @@ class BackupWorker(QObject):
 
         with zipfile.ZipFile(str(backup_zip), "w", compression=zipfile.ZIP_DEFLATED) as z:
 
-            # Save settings.json
+            # Save settings.json (store as a stable relative name, not an absolute path)
             settings_path = Path(SETTINGS_FILE)
             if settings_path.exists():
-                z.write(str(settings_path), SETTINGS_FILE)
+                z.write(str(settings_path), "settings.json")
+                debug_log(f"Backup includes settings: {settings_path} -> settings.json")
+            else:
+                debug_log(f"Backup: settings file not found at {settings_path}")
 
             self.progress.emit(15)
 
@@ -129,6 +132,8 @@ class BackupWorker(QObject):
                 db_path = find_db(db)
                 if db_path:
                     z.write(str(db_path), f"databases/{db}")
+                else:
+                    debug_log(f"Backup: DB not found: {db}")
 
                 p += step
                 self.progress.emit(min(p, 95))
@@ -150,92 +155,147 @@ class BackupWorker(QObject):
         if not self.backup_path or not os.path.exists(self.backup_path):
             raise ValueError("BackupWorker: backup_path invalid.")
 
-        # Extract to temporary folder
-        tmp = tempfile.mkdtemp(prefix="DME_Restore_")
-        with zipfile.ZipFile(self.backup_path, "r") as z:
-            z.extractall(tmp)
+        def _normalize_zip_name(name: str) -> str:
+            return name.replace("\\", "/")
 
-        self.progress.emit(20)
+        def _find_settings_member(z: zipfile.ZipFile) -> str | None:
+            candidates: list[str] = []
+            for member in z.namelist():
+                norm = _normalize_zip_name(member).lower()
+                if norm == "settings.json" or norm.endswith("/settings.json") or norm.endswith("settings.json"):
+                    candidates.append(member)
+            if not candidates:
+                return None
+            # Prefer the shortest path (usually the most portable)
+            candidates.sort(key=lambda n: (len(_normalize_zip_name(n)), _normalize_zip_name(n).lower()))
+            return candidates[0]
 
-        # Restore settings.json with atomic replace
-        extracted_settings = os.path.join(tmp, SETTINGS_FILE)
-        if os.path.exists(extracted_settings):
+        def _safe_orders_count(path: Path) -> int:
             try:
-                # Ensure settings file directory is writable
+                import sqlite3
+
+                conn = sqlite3.connect(str(path))
+                cur = conn.cursor()
+                cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='orders'")
+                if not cur.fetchone():
+                    conn.close()
+                    return -1
+                cur.execute("SELECT COUNT(*) FROM orders")
+                count = int(cur.fetchone()[0])
+                conn.close()
+                return count
+            except Exception:
+                return -1
+
+        with zipfile.ZipFile(self.backup_path, "r") as z:
+            self.progress.emit(15)
+
+            # --- Restore settings.json first (so db_dir() can read restored db_folder) ---
+            settings_member = _find_settings_member(z)
+            if settings_member:
                 settings_dir = os.path.dirname(SETTINGS_FILE) or "."
                 if not os.access(settings_dir, os.W_OK):
                     raise PermissionError(f"Cannot write to settings directory: {settings_dir}")
-                
+
                 # Backup current settings before overwriting
                 if os.path.exists(SETTINGS_FILE):
                     backup_settings = SETTINGS_FILE + ".bak"
                     try:
                         shutil.copy2(SETTINGS_FILE, backup_settings)
                         debug_log(f"Backed up current settings to {backup_settings}")
-                    except PermissionError:
-                        debug_log(f"Warning: Could not backup settings (permission denied)")
-                
-                # Atomic replace: write to temp, then rename
+                    except Exception as e:
+                        debug_log(f"Warning: Could not backup settings: {e}")
+
                 tmp_settings = SETTINGS_FILE + ".tmp"
-                shutil.copy2(extracted_settings, tmp_settings)
-                
-                # Try atomic replace
                 try:
-                    os.replace(tmp_settings, SETTINGS_FILE)  # Atomic on Windows/POSIX
-                    debug_log("Settings restored successfully")
-                except PermissionError:
-                    # Cleanup temp file on permission error
+                    with z.open(settings_member, "r") as src, open(tmp_settings, "wb") as dst:
+                        shutil.copyfileobj(src, dst)
+                    os.replace(tmp_settings, SETTINGS_FILE)
+                    debug_log(f"Settings restored successfully from '{settings_member}' -> {SETTINGS_FILE}")
+
+                    # Invalidate cache so db_dir() picks up restored db_folder
                     try:
-                        os.remove(tmp_settings)
-                    except:
+                        from .settings import invalidate_settings_cache
+
+                        invalidate_settings_cache()
+                    except Exception:
                         pass
-                    raise PermissionError(
-                        f"Permission denied: Cannot write to '{SETTINGS_FILE}'.\n\n"
-                        f"Try running the application as Administrator, or\n"
-                        f"manually copy the settings file from the backup."
-                    )
-                
-            except PermissionError:
-                raise  # Re-raise permission errors with clear message
-            except Exception as e:
-                debug_log(f"Settings restore failed: {e} (check .bak for recovery)")
-                raise
+                except Exception as e:
+                    try:
+                        if os.path.exists(tmp_settings):
+                            os.remove(tmp_settings)
+                    except Exception:
+                        pass
+                    debug_log(f"Settings restore failed: {e} (check .bak for recovery)")
+                    raise
+            else:
+                debug_log("Restore: No settings.json found in backup zip (continuing with existing settings)")
 
-        self.progress.emit(40)
+            self.progress.emit(35)
 
-        # Determine DB target folder
-        db_folder = db_dir()
-        db_folder.mkdir(parents=True, exist_ok=True)
+            # Determine DB target folder (after settings restore)
+            db_folder = db_dir()
+            db_folder.mkdir(parents=True, exist_ok=True)
+            debug_log(f"Restore target db_dir(): {db_folder}")
 
-        # Restore databases with safety backups
-        db_extract_dir = os.path.join(tmp, "databases")
-        if os.path.exists(db_extract_dir):
-            db_files = [f for f in os.listdir(db_extract_dir) if f.endswith(".db")]
-            step = 55 // max(len(db_files), 1)
-            p = 40
-            
-            for file in db_files:
+            # --- Restore database files with safety backups ---
+            db_members = [
+                m for m in z.namelist()
+                if _normalize_zip_name(m).lower().startswith("databases/")
+                and _normalize_zip_name(m).lower().endswith(".db")
+            ]
+
+            step = 55 // max(len(db_members), 1)
+            p = 35
+
+            for member in db_members:
+                file_name = Path(_normalize_zip_name(member)).name
                 try:
-                    target_db = db_folder / file
-                    
+                    target_db = db_folder / file_name
+
                     # Backup current DB before overwriting
                     if target_db.exists():
                         backup_db = str(target_db) + ".bak"
                         shutil.copy2(str(target_db), backup_db)
-                        debug_log(f"Backed up {file} to {backup_db}")
-                    
-                    # Atomic replace: copy to temp, then rename
+                        debug_log(f"Backed up {file_name} to {backup_db}")
+
                     tmp_db = str(target_db) + ".tmp"
-                    shutil.copy2(os.path.join(db_extract_dir, file), tmp_db)
-                    os.replace(tmp_db, str(target_db))  # Atomic
-                    debug_log(f"Restored {file} successfully")
-                    
+                    with z.open(member, "r") as src, open(tmp_db, "wb") as dst:
+                        shutil.copyfileobj(src, dst)
+                    os.replace(tmp_db, str(target_db))
+                    debug_log(f"Restored {file_name} successfully to {target_db}")
                 except Exception as e:
-                    debug_log(f"Failed to restore {file}: {e} (check .bak for recovery)")
-                    # Continue with other databases even if one fails
-                
+                    debug_log(f"Failed to restore {file_name} from {member}: {e} (check .bak for recovery)")
+
                 p += step
                 self.progress.emit(min(p, 95))
+
+            # --- Restore Fee Schedule Excel if present ---
+            try:
+                xlsx_members = [
+                    m for m in z.namelist()
+                    if _normalize_zip_name(m).lower().startswith("extras/fee_schedule/")
+                    and _normalize_zip_name(m).lower().endswith(".xlsx")
+                ]
+                if xlsx_members:
+                    # Pick the largest as a heuristic
+                    best = max(xlsx_members, key=lambda m: z.getinfo(m).file_size)
+                    dst = db_folder / Path(_normalize_zip_name(best)).name
+                    tmp_xlsx = str(dst) + ".tmp"
+                    with z.open(best, "r") as src, open(tmp_xlsx, "wb") as out:
+                        shutil.copyfileobj(src, out)
+                    os.replace(tmp_xlsx, str(dst))
+                    debug_log(f"Restored fee schedule: {dst}")
+            except Exception as e:
+                debug_log(f"Fee schedule restore skipped/failed: {e}")
+
+            # Final diagnostic: log active orders.db path + count
+            try:
+                orders_db = db_folder / "orders.db"
+                count = _safe_orders_count(orders_db) if orders_db.exists() else -1
+                debug_log(f"Post-restore check: orders.db={orders_db} exists={orders_db.exists()} rows={count}")
+            except Exception:
+                pass
 
         self.progress.emit(100)
         debug_log("Restore complete. Backup files (.bak) kept for safety.")

@@ -8918,7 +8918,12 @@ class SearchWorker(QThread):
 class PDFViewer(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("DMELogic v2.0 (Build 2.0.20.126) - Complete DME Software Solution")
+        try:
+            from dmelogic.version import APP_VERSION
+            build = APP_VERSION
+        except Exception:
+            build = "unknown"
+        self.setWindowTitle(f"DMELogic v2.0 (Build {build}) - Complete DME Software Solution")
         self.setGeometry(100, 100, 1400, 900)
 
         # --- Load Settings ---

@@ -7192,7 +7192,7 @@ class PDFViewer(QMainWindow):
             from dmelogic.version import APP_VERSION
             version_str = APP_VERSION
         except ImportError:
-            version_str = "2.0.20.133"
+            version_str = "2.0.20.137"
         self.setWindowTitle(f"DMELogic v{version_str} - Complete DME Software Solution")
         self.setGeometry(100, 100, 1400, 900)
 

@@ -3,7 +3,7 @@
 ; First run will prompt user to configure server folder locations
 
 #define MyAppName "DMELogic"
-#define MyAppVersion "2.0.20.133"
+#define MyAppVersion "2.0.20.137"
 #define MyAppPublisher "DME Solutions"
 #define MyAppExeName "DMELogic.exe"
 #define MyAppURL "https://github.com/mrrfreud/DMELogic-Refactored"
@@ -15,7 +15,8 @@ AppVersion={#MyAppVersion}
 AppPublisher={#MyAppPublisher}
 AppPublisherURL={#MyAppURL}
 AppSupportURL={#MyAppURL}
-DefaultDirName={autopf}\{#MyAppName}
+; Per-user install so settings under %LOCALAPPDATA% always match the user running the app.
+DefaultDirName={localappdata}\Programs\{#MyAppName}
 DefaultGroupName={#MyAppName}
 AllowNoIcons=yes
 ; Output to installer_output folder
@@ -25,7 +26,8 @@ SetupIconFile=assets\DMELogic Icon.ico
 Compression=lzma2/ultra64
 SolidCompression=yes
 WizardStyle=modern
-PrivilegesRequired=admin
+PrivilegesRequired=lowest
+PrivilegesRequiredOverridesAllowed=dialog
 UninstallDisplayIcon={app}\{#MyAppExeName}
 DisableProgramGroupPage=yes
 ; Show license if exists
@@ -70,8 +72,8 @@ Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; WorkingDi
 
 [Registry]
 ; Store app installation path for reference
-Root: HKLM; Subkey: "Software\DMELogic"; ValueType: string; ValueName: "InstallPath"; ValueData: "{app}"; Flags: uninsdeletekey
-Root: HKLM; Subkey: "Software\DMELogic"; ValueType: string; ValueName: "Version"; ValueData: "{#MyAppVersion}"; Flags: uninsdeletekey
+Root: HKCU; Subkey: "Software\DMELogic"; ValueType: string; ValueName: "InstallPath"; ValueData: "{app}"; Flags: uninsdeletekey
+Root: HKCU; Subkey: "Software\DMELogic"; ValueType: string; ValueName: "Version"; ValueData: "{#MyAppVersion}"; Flags: uninsdeletekey
 
 [Run]
 ; Launch after install (checked by default)

@@ -92,6 +92,12 @@ def find_existing_db(filename: str, folder_path: Optional[str] = None) -> Option
         if os.path.isdir(default_dme_folder):
             paths.append(os.path.join(default_dme_folder, filename))
 
+        # Installed builds may store data under ProgramData
+        programdata = os.environ.get("PROGRAMDATA", r"C:\ProgramData")
+        programdata_dmelogic = os.path.join(programdata, "DMELogic", "Data")
+        if os.path.isdir(programdata_dmelogic):
+            paths.append(os.path.join(programdata_dmelogic, filename))
+
         try:
             parent = os.path.dirname(base_folder)
             paths.append(os.path.join(parent, filename))
@@ -154,8 +160,9 @@ def resolve_db_path(filename: str, folder_path: Optional[str] = None) -> str:
                     try:
                         dest_size = os.path.getsize(dest_path)
                         src_size = os.path.getsize(existing)
-                        # Only replace if the existing DB is clearly larger.
-                        if src_size > (dest_size * 1.25) and src_size > 1024 * 1024:
+                        # Replace if the existing DB is larger.
+                        # Note: production datasets can be well under 1MB, so do not gate on size.
+                        if src_size > dest_size:
                             ts = datetime.now().strftime("%Y%m%d_%H%M%S")
                             backup_path = f"{dest_path}.premerge_{ts}.bak"
                             try:

@@ -217,11 +217,14 @@ def install_update(installer_path: str) -> bool:
 def get_last_update_check() -> Optional[str]:
     """Get the timestamp of the last update check from settings."""
     try:
-        from dmelogic.config import SETTINGS_FILE
-        if os.path.exists(SETTINGS_FILE):
-            with open(SETTINGS_FILE, 'r') as f:
-                settings = json.load(f)
-            return settings.get('last_update_check')
+        # Use the centralized settings loader so we don't accidentally
+        # desync/overwrite settings managed elsewhere.
+        from dmelogic.settings import invalidate_settings_cache, load_settings
+
+        invalidate_settings_cache()
+        settings = load_settings(create_if_missing=False) or {}
+        if isinstance(settings, dict):
+            return settings.get("last_update_check")
     except Exception:
         pass
     return None
@@ -230,15 +233,20 @@ def get_last_update_check() -> Optional[str]:
 def set_last_update_check(timestamp: str) -> None:
     """Save the timestamp of the last update check to settings."""
     try:
-        from dmelogic.config import SETTINGS_FILE
-        settings = {}
-        if os.path.exists(SETTINGS_FILE):
-            with open(SETTINGS_FILE, 'r') as f:
-                settings = json.load(f)
-        settings['last_update_check'] = timestamp
-        os.makedirs(os.path.dirname(SETTINGS_FILE), exist_ok=True)
-        with open(SETTINGS_FILE, 'w') as f:
-            json.dump(settings, f, indent=2)
+        # IMPORTANT: Never create or clobber settings.json here.
+        # Creating a partial settings file (e.g., only last_update_check)
+        # can wipe db_folder and cause the app to fall back to a default DB,
+        # which looks like "missing orders".
+        from dmelogic.settings import invalidate_settings_cache, load_settings, save_settings
+
+        invalidate_settings_cache()
+        settings = load_settings(create_if_missing=False)
+        if not isinstance(settings, dict) or not settings:
+            return
+
+        updated = dict(settings)
+        updated["last_update_check"] = timestamp
+        save_settings(updated)
     except Exception as e:
         logger.warning(f"Could not save update check timestamp: {e}")
 
@@ -246,15 +254,16 @@ def set_last_update_check(timestamp: str) -> None:
 def skip_version(version: str) -> None:
     """Mark a version to be skipped in future update checks."""
     try:
-        from dmelogic.config import SETTINGS_FILE
-        settings = {}
-        if os.path.exists(SETTINGS_FILE):
-            with open(SETTINGS_FILE, 'r') as f:
-                settings = json.load(f)
-        settings['skipped_version'] = version
-        os.makedirs(os.path.dirname(SETTINGS_FILE), exist_ok=True)
-        with open(SETTINGS_FILE, 'w') as f:
-            json.dump(settings, f, indent=2)
+        from dmelogic.settings import invalidate_settings_cache, load_settings, save_settings
+
+        invalidate_settings_cache()
+        settings = load_settings(create_if_missing=False)
+        if not isinstance(settings, dict) or not settings:
+            return
+
+        updated = dict(settings)
+        updated["skipped_version"] = version
+        save_settings(updated)
     except Exception as e:
         logger.warning(f"Could not save skipped version: {e}")
 
@@ -262,11 +271,12 @@ def skip_version(version: str) -> None:
 def get_skipped_version() -> Optional[str]:
     """Get the version that was marked to be skipped."""
     try:
-        from dmelogic.config import SETTINGS_FILE
-        if os.path.exists(SETTINGS_FILE):
-            with open(SETTINGS_FILE, 'r') as f:
-                settings = json.load(f)
-            return settings.get('skipped_version')
+        from dmelogic.settings import invalidate_settings_cache, load_settings
+
+        invalidate_settings_cache()
+        settings = load_settings(create_if_missing=False) or {}
+        if isinstance(settings, dict):
+            return settings.get("skipped_version")
     except Exception:
         pass
     return None

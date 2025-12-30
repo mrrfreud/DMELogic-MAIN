@@ -53,8 +53,10 @@ def get_theme_dir() -> Path:
 def get_logs_dir() -> Path:
     """Ensure logs folder exists and return it (in a writable location)."""
     if getattr(sys, 'frozen', False):
-        # When frozen (installed), use ProgramData which is writable
-        logs = Path(os.getenv('PROGRAMDATA', 'C:\\ProgramData')) / "DMELogic" / "Logs"
+        # When frozen (installed), prefer per-user logs.
+        # This avoids elevation requirements and prevents cross-user profile confusion.
+        local_appdata = os.getenv('LOCALAPPDATA') or os.path.expanduser('~')
+        logs = Path(local_appdata) / "DMELogic" / "Logs"
     else:
         # In dev mode, use project root
         logs = get_project_root() / "Logs"
@@ -90,16 +92,11 @@ def _get_installed_data_path() -> Path | None:
 def db_dir() -> Path:
     """
     Central DB folder with priority:
-    1. Installed app data path (from data_path.txt)
-    2. Settings.json db_folder
+    1. Settings.json db_folder
+    2. Installed app data path (from data_path.txt)
     3. Default db folder
     """
-    # First check if this is an installed app
-    installed_path = _get_installed_data_path()
-    if installed_path:
-        return installed_path
-    
-    # Then check settings
+    # First check settings (authoritative for both dev + USB/installed builds)
     try:
         from .settings import load_settings
         settings = load_settings()
@@ -110,6 +107,11 @@ def db_dir() -> Path:
             return p
     except Exception:
         pass
+
+    # Then check if this is an installed app (legacy/installer-provided location)
+    installed_path = _get_installed_data_path()
+    if installed_path:
+        return installed_path
     
     # Finally fall back to default
     return Path(_default_db_folder())
@@ -198,12 +200,10 @@ def ub04_exports_dir() -> Path:
 
 
 def logs_dir() -> Path:
-    """Centralized logs directory."""
-    p = PROJECT_ROOT / "Logs"
-    p.mkdir(parents=True, exist_ok=True)
-    return p
+    """Centralized logs directory (writable in both dev and frozen modes)."""
+    return get_logs_dir()
 
 
 def debug_log_path() -> Path:
     """Path to debug log file in centralized Logs directory."""
-    return logs_dir() / DEBUG_LOG_FILE
+    return get_logs_dir() / DEBUG_LOG_FILE

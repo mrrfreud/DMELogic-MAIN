@@ -1,15 +1,136 @@
-"""
-settings.py — Load and save persistent settings.
-"""
+"""settings.py — Load and save persistent settings."""
 
 import json
 import os
-from typing import Optional
+import sqlite3
+from pathlib import Path
+from typing import Optional, Iterable
+
 from .config import SETTINGS_FILE, _default_db_folder, debug_log
 
 
 # Global in-memory cache to avoid repeated disk reads
 _SETTINGS_CACHE: Optional[dict] = None
+
+
+def _iter_candidate_orders_dbs() -> Iterable[Path]:
+    """Yield likely orders.db candidates without doing an expensive full-disk scan."""
+    # Common/legacy roots (these mirror what users typically have)
+    common_relative = [
+        Path("Dme_Solutions") / "Data",
+        Path(os.getenv("PROGRAMDATA", "C:\\ProgramData")) / "DMELogic" / "Data",
+        Path("FaxManagerData") / "Data",
+    ]
+
+    # Probe all existing drive letters for the same relative layouts.
+    for letter in "CDEFGHIJKLMNOPQRSTUVWXYZ":
+        drive = Path(f"{letter}:\\")
+        if not drive.exists():
+            continue
+        for rel in common_relative:
+            base = drive / rel
+            db = base / "orders.db"
+            if db.exists():
+                yield db
+            # Also consider orders*.db* next to the primary DB (premerge/dev backups)
+            if base.is_dir():
+                try:
+                    for child in base.iterdir():
+                        name = child.name.lower()
+                        if child.is_file() and name.startswith("orders") and ".db" in name:
+                            yield child
+                except Exception:
+                    pass
+
+    # Small, low-cost extra: look for obvious backups under Desktop.
+    try:
+        desktop = Path(os.path.expanduser("~")) / "Desktop"
+        if desktop.is_dir():
+            for root_name in ("backup to dme app", "Dme_Solutions", "FaxManagerData"):
+                root = desktop / root_name
+                if root.exists() and root.is_dir():
+                    for p in root.rglob("orders.db"):
+                        yield p
+    except Exception:
+        pass
+
+
+def _safe_orders_count(db_path: Path) -> int:
+    try:
+        conn = sqlite3.connect(str(db_path))
+        cur = conn.cursor()
+        cur.execute("SELECT name FROM sqlite_master WHERE type='table'")
+        tables = {r[0] for r in cur.fetchall()}
+        if "orders" not in tables:
+            conn.close()
+            return -1
+        cur.execute("SELECT COUNT(*) FROM orders")
+        count = int(cur.fetchone()[0])
+        conn.close()
+        return count
+    except Exception:
+        return -1
+
+
+def _discover_best_db_folder() -> str | None:
+    """Pick the most complete DB by orders row-count (ties by size/mtime)."""
+    best: tuple[int, int, float, Path] | None = None
+    seen: set[Path] = set()
+
+    for db in _iter_candidate_orders_dbs():
+        try:
+            db = db.resolve()
+        except Exception:
+            pass
+        if db in seen:
+            continue
+        seen.add(db)
+
+        count = _safe_orders_count(db)
+        if count < 0:
+            continue
+
+        try:
+            st = db.stat()
+            size = int(st.st_size)
+            mtime = float(st.st_mtime)
+        except Exception:
+            size, mtime = 0, 0.0
+
+        score = (count, size, mtime, db)
+        if best is None or score > best:
+            best = score
+
+    if best is None:
+        return None
+    return str(best[3].parent)
+
+
+def _apply_default_settings(data: dict) -> tuple[dict, bool]:
+    """Merge in required defaults when settings file was clobbered/partial."""
+    changed = False
+    if not isinstance(data, dict):
+        data = {}
+        changed = True
+
+    # Ensure db_folder exists (common failure mode: overwritten settings).
+    if not data.get("db_folder"):
+        discovered = _discover_best_db_folder()
+        data["db_folder"] = discovered or _default_db_folder()
+        changed = True
+
+    # Safe defaults (only if missing)
+    if "last_open_folder" not in data:
+        data["last_open_folder"] = ""
+        changed = True
+    if "fee_schedule_path" not in data:
+        data["fee_schedule_path"] = ""
+        changed = True
+    if "theme" not in data:
+        data["theme"] = "light"
+        changed = True
+
+    return data, changed
 
 
 def load_settings(create_if_missing: bool = False) -> dict:
@@ -46,8 +167,13 @@ def load_settings(create_if_missing: bool = False) -> dict:
     try:
         with open(SETTINGS_FILE, "r", encoding="utf-8") as f:
             data = json.load(f)
+
+        data, changed = _apply_default_settings(data)
+        if changed:
+            save_settings(data)
+        else:
             _SETTINGS_CACHE = data
-            return data
+        return data
     except Exception as e:
         debug_log(f"Failed to load settings.json: {e}")
         return {}

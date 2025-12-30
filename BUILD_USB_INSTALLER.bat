@@ -39,7 +39,7 @@ pyinstaller --noconfirm ^
     --hidden-import=fitz ^
     --hidden-import=pytesseract ^
     --collect-all=reportlab ^
-    app.py
+    app_usb.py
 
 if errorlevel 1 (
     echo.
