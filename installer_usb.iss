@@ -3,7 +3,7 @@
 ; First run will prompt user to configure server folder locations
 
 #define MyAppName "DMELogic"
-#define MyAppVersion "2.0.20.137"
+#define MyAppVersion "2.0.20.152"
 #define MyAppPublisher "DME Solutions"
 #define MyAppExeName "DMELogic.exe"
 #define MyAppURL "https://github.com/mrrfreud/DMELogic-Refactored"
@@ -120,9 +120,8 @@ begin
   InfoMemo.Lines.Add('   Where scanned/faxed documents (PDFs) are stored.');
   InfoMemo.Lines.Add('   Example: \\SERVER\DMEData\Faxes');
   InfoMemo.Lines.Add('');
-  InfoMemo.Lines.Add('3. BACKUP FOLDER (Optional)');
-  InfoMemo.Lines.Add('   Where automatic backups will be saved.');
-  InfoMemo.Lines.Add('   Example: \\SERVER\DMEData\Backups');
+  InfoMemo.Lines.Add('NOTE: Backups run automatically on the SERVER.');
+  InfoMemo.Lines.Add('Client workstations do not need backup configuration.');
   InfoMemo.Lines.Add('');
   InfoMemo.Lines.Add('Please contact your IT administrator if you are unsure about these paths.');
 end;

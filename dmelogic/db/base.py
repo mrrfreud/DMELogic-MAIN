@@ -1,12 +1,130 @@
 import os
 import sqlite3
 import shutil
+import threading
 from datetime import datetime
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List, Callable
 
 from dmelogic.config import _default_db_folder  # from your extracted config.py
 from dmelogic.settings import load_settings
 from dmelogic.config import debug_log  # optional, for logging
+
+
+# ----------------------------------------------------------
+# WRITE GATE - Global backup mode management
+# ----------------------------------------------------------
+
+_DB_WRITE_LOCK = threading.RLock()
+_WRITES_BLOCKED = threading.Event()
+_BACKUP_MODE_REASON: str = ""
+_BACKUP_MODE_CALLBACKS: List[Callable[[bool, str], None]] = []
+
+
+class WritesBlockedError(RuntimeError):
+    """Raised when a write is attempted while writes are globally blocked."""
+
+
+def register_backup_mode_callback(callback: Callable[[bool, str], None]) -> None:
+    """Register a callback to be notified when backup mode changes.
+    
+    Callback signature: callback(is_backup_mode: bool, reason: str)
+    Called when entering or exiting backup mode.
+    """
+    if callback not in _BACKUP_MODE_CALLBACKS:
+        _BACKUP_MODE_CALLBACKS.append(callback)
+
+
+def unregister_backup_mode_callback(callback: Callable[[bool, str], None]) -> None:
+    """Remove a previously registered backup mode callback."""
+    if callback in _BACKUP_MODE_CALLBACKS:
+        _BACKUP_MODE_CALLBACKS.remove(callback)
+
+
+def _notify_backup_mode_change(entering: bool, reason: str) -> None:
+    """Notify all registered callbacks about backup mode change."""
+    for cb in _BACKUP_MODE_CALLBACKS:
+        try:
+            cb(entering, reason)
+        except Exception as e:
+            debug_log(f"Backup mode callback error: {e}")
+
+
+def enter_backup_mode(reason: str = "Backup in progress") -> None:
+    """Enter backup mode - blocks all database writes.
+    
+    This should be called before starting any backup or restore operation.
+    All registered callbacks will be notified (e.g., to show UI banner).
+    """
+    global _BACKUP_MODE_REASON
+    _BACKUP_MODE_REASON = reason
+    _WRITES_BLOCKED.set()
+    debug_log(f"DB: entering backup mode: {reason}")
+    _notify_backup_mode_change(True, reason)
+
+
+def exit_backup_mode() -> None:
+    """Exit backup mode - allows database writes again.
+    
+    This should always be called in a finally block after backup operations.
+    """
+    global _BACKUP_MODE_REASON
+    _WRITES_BLOCKED.clear()
+    reason = _BACKUP_MODE_REASON
+    _BACKUP_MODE_REASON = ""
+    debug_log("DB: exiting backup mode")
+    _notify_backup_mode_change(False, reason)
+
+
+def is_backup_mode() -> bool:
+    """Check if the application is currently in backup mode."""
+    return _WRITES_BLOCKED.is_set()
+
+
+def get_backup_mode_reason() -> str:
+    """Get the reason for current backup mode, or empty string if not in backup mode."""
+    return _BACKUP_MODE_REASON if _WRITES_BLOCKED.is_set() else ""
+
+
+# Legacy aliases for backward compatibility
+def block_writes(reason: str = "") -> None:
+    """Prevent new write operations while a maintenance task runs.
+    
+    Deprecated: Use enter_backup_mode() instead for better UI integration.
+    """
+    enter_backup_mode(reason or "Maintenance in progress")
+
+
+def unblock_writes() -> None:
+    """Re-allow writes after maintenance completes.
+    
+    Deprecated: Use exit_backup_mode() instead for better UI integration.
+    """
+    exit_backup_mode()
+
+
+def ensure_writes_allowed() -> None:
+    """Raise WritesBlockedError if a write is attempted while blocked.
+    
+    Call this at the start of any write operation (create, update, delete).
+    """
+    if _WRITES_BLOCKED.is_set():
+        reason = _BACKUP_MODE_REASON or "backup or maintenance in progress"
+        raise WritesBlockedError(
+            f"Database writes are temporarily disabled ({reason})."
+        )
+
+
+class WriteLock:
+    """Process-wide mutex for coordinating writes with backups/restores."""
+
+    def __enter__(self):  # type: ignore[override]
+        _DB_WRITE_LOCK.acquire()
+        return self
+
+    def __exit__(self, exc_type, exc, tb):  # type: ignore[override]
+        _DB_WRITE_LOCK.release()
+        # Do not suppress exceptions
+        return False
 
 
 def _load_db_folder_preferred() -> Optional[str]:
@@ -335,12 +453,15 @@ class UnitOfWork:
         """Commit all open connections."""
         if self._closed:
             return
-        for conn in self._conns.values():
-            try:
-                conn.commit()
-            except Exception as e:
-                debug_log(f"UoW commit error: {e}")
-                # best-effort; caller may decide to rollback
+        # Honor global write gate and serialize commits with maintenance tasks
+        ensure_writes_allowed()
+        with _DB_WRITE_LOCK:
+            for conn in self._conns.values():
+                try:
+                    conn.commit()
+                except Exception as e:
+                    debug_log(f"UoW commit error: {e}")
+                    # best-effort; caller may decide to rollback
         self._committed = True
 
     def rollback(self):

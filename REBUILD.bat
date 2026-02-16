@@ -52,7 +52,7 @@ if exist "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" (
     echo.
     echo ============================================
     echo SUCCESS! Installer ready at:
-    echo installer_output\DMELogic_Setup_2.0.20.66.exe
+    echo installer_output\DMELogic_Update_2.0.20.152.exe
     echo ============================================
 ) else (
     echo.

@@ -239,8 +239,7 @@ class RefillDueScreen(QWidget):
             item = QTableWidgetItem(refill.get('prescriber_name', ''))
             self.table.setItem(row_idx, 8, item)
             
-            # Apply row color coding to entire row
-            color_code_refill_row(self.table, row_idx, days_until)
+            # Per-cell refill status coloring is handled by create_refill_status_item
         
         self._update_summary()
     

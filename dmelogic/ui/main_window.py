@@ -63,10 +63,11 @@ def build_orders_tab(self) -> QWidget:
     self.orders_search_edit.setPlaceholderText("Search orders (patient, order #, status)...")
 
     self.orders_status_combo = QComboBox()
-    self.orders_status_combo.addItems(["All statuses", "Open", "Pending", "Shipped", "Cancelled"])
+    self.orders_status_combo.addItems(["All statuses", "Unbilled", "On Hold", "Open", "Pending", "Shipped", "Delivered", "Cancelled"])
 
     self.orders_date_combo = QComboBox()
-    self.orders_date_combo.addItems(["All dates", "Last 7 days", "Last 30 days", "This year"])
+    # Date filters: match dashboard logic (week starts Monday, month starts 1st)
+    self.orders_date_combo.addItems(["All dates", "This week", "This month", "This year"])
 
     top_bar.addWidget(QLabel("Search:"))
     top_bar.addWidget(self.orders_search_edit, 2)
@@ -94,9 +95,9 @@ def build_orders_tab(self) -> QWidget:
 
     # Summary labels
     self.orders_summary_label = QLabel("No order selected")
-    self.orders_summary_label.setStyleSheet("font-weight: 500; color: #333333;")
+    self.orders_summary_label.setProperty("typo", "section")
     self.orders_sub_label = QLabel("")
-    self.orders_sub_label.setStyleSheet("color: #666666; font-size: 9pt;")
+    self.orders_sub_label.setProperty("typo", "caption")
 
     summary_layout = QVBoxLayout()
     summary_layout.setContentsMargins(0, 0, 0, 0)
@@ -116,13 +117,17 @@ def build_orders_tab(self) -> QWidget:
     
     self.order_button_bar = DraggableButtonBar(save_callback=_save_order_button_order)
     
-    # Add all buttons with keys for identification
-    self.btn_new_order = self.order_button_bar.add_button(
-        "new_order", "➕ New Order", "Create a new order"
-    )
+    # Add all buttons with keys for identification (Orders tab)
     self.btn_edit_order = self.order_button_bar.add_button(
         "edit_order", "✏️ Edit Order", "Edit the selected order"
     )
+    # Make Edit Order the primary action visually
+    try:
+        self.btn_edit_order.setProperty("primary", True)
+        self.btn_edit_order.style().unpolish(self.btn_edit_order)
+        self.btn_edit_order.style().polish(self.btn_edit_order)
+    except Exception:
+        pass
     self.btn_update_status = self.order_button_bar.add_button(
         "update_status", "🔄 Update Status", "Update order status"
     )
@@ -138,6 +143,9 @@ def build_orders_tab(self) -> QWidget:
     self.btn_reverse_refill = self.order_button_bar.add_button(
         "reverse_refill", "↩️ Reverse Refill", "Undo a refill: restore refills to parent and delete the refill order"
     )
+    self.btn_refill_request = self.order_button_bar.add_button(
+        "refill_request", "📋 Refill Request", "Generate a fax to request new prescriptions from the provider"
+    )
     
     # Batch operations section
     self.btn_batch_delivered = self.order_button_bar.add_button(
@@ -152,6 +160,9 @@ def build_orders_tab(self) -> QWidget:
     )
     self.btn_epaces = self.order_button_bar.add_button(
         "epaces", "🔐 Bill in ePACES", "Open copy-friendly helper for manual ePACES portal entry"
+    )
+    self.btn_print_delivery_ticket = self.order_button_bar.add_button(
+        "print_delivery_ticket", "🎫 Print Delivery Ticket", "Generate delivery ticket PDF for the selected order"
     )
     self.btn_generate_1500 = self.order_button_bar.add_button(
         "generate_1500", "📄 Generate 1500 JSON", "Generate HCFA-1500 claim data (JSON preview)"
@@ -170,6 +181,17 @@ def build_orders_tab(self) -> QWidget:
     saved_order = self.settings.get('order_button_order', [])
     if saved_order:
         self.order_button_bar.set_order(saved_order)
+
+    # Persist button order on app exit to survive restarts
+    try:
+        app_instance = QApplication.instance()
+        if app_instance:
+            def _persist_order_buttons():
+                self.settings['order_button_order'] = self.order_button_bar.get_order()
+                self.save_settings()
+            app_instance.aboutToQuit.connect(_persist_order_buttons)
+    except Exception:
+        pass
     
     bottom_layout.addWidget(self.order_button_bar)
 
@@ -744,6 +766,13 @@ class MainWindow(PDFViewer):
         # Show dialog modally
         dialog.exec()
 
+        # Ensure orders grid reflects any changes made while the editor was open
+        if hasattr(self, 'load_orders'):
+            try:
+                self.load_orders()
+            except Exception:
+                pass
+
     def edit_order_by_id_modern(self, order_id: int) -> None:
         """
         Modern wrapper for edit_order_by_id that uses the new Order Editor.
@@ -930,11 +959,15 @@ class MainWindow(PDFViewer):
             order_input = OrderInput(
                 patient_last_name=last_name,
                 patient_first_name=first_name,
+                patient_id=result.patient_id or None,
                 patient_dob=(result.patient_dob or "").strip() or None,
                 patient_phone=(result.patient_phone or "").strip() or None,
                 patient_address=patient_address or None,
                 prescriber_name=(result.prescriber_name or "").strip() or None,
                 prescriber_npi=(result.prescriber_npi or "").strip() or None,
+                rx_date_2=(result.rx_date_2 or "").strip() or None,
+                prescriber_name_2=(result.prescriber_name_2 or "").strip() or None,
+                prescriber_npi_2=(result.prescriber_npi_2 or "").strip() or None,
                 rx_date=rx_date_str,
                 order_date=order_date_str,
                 delivery_date=delivery_date_str,
@@ -954,6 +987,10 @@ class MainWindow(PDFViewer):
 
             # Let the DB layer validate and persist
             new_order_id = create_order(order_input, folder_path=folder_path)
+
+            # Process attachment files from wizard (if any)
+            if hasattr(result, 'attachment_paths') and result.attachment_paths:
+                self._process_wizard_attachments(new_order_id, result.attachment_paths, folder_path, patient_id=result.patient_id)
 
             # Fetch the newly created order with items to show in EPACES dialog
             order = fetch_order_with_items(new_order_id, folder_path=folder_path)
@@ -987,6 +1024,131 @@ class MainWindow(PDFViewer):
                 "Error Creating Order",
                 f"An error occurred while creating the order:\n{e}",
             )
+
+    def _process_wizard_attachments(self, order_id: int, attachment_paths: list, folder_path: str = None, patient_id: int = None) -> None:
+        """
+        Copy attachment files from wizard to order's document folder and update DB.
+        Also auto-links documents to the patient's profile.
+        """
+        import shutil
+        from pathlib import Path
+        import sqlite3
+        
+        if not attachment_paths:
+            return
+            
+        try:
+            from dmelogic.paths import fax_root
+            
+            # Create order documents folder
+            order_docs_dir = fax_root() / "OrderDocuments" / f"ORD-{order_id:03d}"
+            order_docs_dir.mkdir(parents=True, exist_ok=True)
+            
+            copied_files = []
+            original_names = []
+            for src_path in attachment_paths:
+                try:
+                    src = Path(src_path)
+                    if not src.exists():
+                        print(f"⚠️ Attachment not found: {src_path}")
+                        continue
+                    
+                    dest = order_docs_dir / src.name
+                    
+                    # Handle duplicate names
+                    counter = 1
+                    while dest.exists():
+                        stem = src.stem
+                        suffix = src.suffix
+                        dest = order_docs_dir / f"{stem}_{counter}{suffix}"
+                        counter += 1
+                    
+                    shutil.copy2(src, dest)
+                    copied_files.append(str(dest))
+                    original_names.append(src.name)
+                    print(f"✅ Attached: {src.name} → {dest}")
+                except Exception as e:
+                    print(f"⚠️ Failed to copy attachment {src_path}: {e}")
+            
+            if copied_files:
+                # Update order's attached_rx_files field in DB
+                from dmelogic.db.base import get_connection
+                
+                conn = get_connection("orders.db", folder_path)
+                cur = conn.cursor()
+                
+                # Get existing attached files
+                cur.execute("SELECT attached_rx_files FROM orders WHERE id = ?", (order_id,))
+                row = cur.fetchone()
+                current_files = row[0] if row and row[0] else ""
+                
+                # Build new list (append to existing if any)
+                if current_files:
+                    all_files = current_files + "\n" + "\n".join(copied_files)
+                else:
+                    all_files = "\n".join(copied_files)
+                
+                cur.execute(
+                    "UPDATE orders SET attached_rx_files = ? WHERE id = ?",
+                    (all_files, order_id)
+                )
+                conn.commit()
+                conn.close()
+                
+                print(f"✅ Attached {len(copied_files)} documents to order {order_id}")
+                
+                # Auto-attach to patient profile
+                if patient_id:
+                    self._auto_attach_to_patient(patient_id, copied_files, original_names, order_id, folder_path)
+                    
+        except Exception as e:
+            print(f"❌ Error processing wizard attachments: {e}")
+
+    def _auto_attach_to_patient(self, patient_id: int, file_paths: list, original_names: list, order_id: int, folder_path: str = None):
+        """Auto-attach order documents to patient profile."""
+        try:
+            import sqlite3
+            from dmelogic.db.base import resolve_db_path
+            
+            patient_db_path = resolve_db_path("patients.db", folder_path=folder_path)
+            conn = sqlite3.connect(patient_db_path)
+            cur = conn.cursor()
+            
+            # Ensure table exists
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS patient_documents (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    patient_id INTEGER NOT NULL,
+                    description TEXT,
+                    original_name TEXT,
+                    stored_path TEXT,
+                    created_at TEXT DEFAULT (datetime('now'))
+                )
+            """)
+            
+            order_num = f"ORD-{order_id:03d}"
+            
+            for file_path, orig_name in zip(file_paths, original_names):
+                # Check if already linked (avoid duplicates)
+                cur.execute(
+                    "SELECT id FROM patient_documents WHERE patient_id = ? AND stored_path = ?",
+                    (patient_id, file_path)
+                )
+                if cur.fetchone():
+                    continue
+                
+                description = f"From {order_num}"
+                cur.execute(
+                    "INSERT INTO patient_documents (patient_id, description, original_name, stored_path) VALUES (?, ?, ?, ?)",
+                    (patient_id, description, orig_name, file_path)
+                )
+            
+            conn.commit()
+            conn.close()
+            print(f"✅ Auto-attached {len(file_paths)} documents to patient {patient_id}")
+            
+        except Exception as e:
+            print(f"⚠️ Failed to auto-attach documents to patient: {e}")
 
     def on_new_order_from_patients(self) -> None:
         """Start wizard using selected patient (if any) as context."""

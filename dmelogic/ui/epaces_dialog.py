@@ -28,6 +28,15 @@ from dmelogic.db.base import resolve_db_path
 from dmelogic.services.patient_address import get_patient_full_address
 
 
+def _format_order_number(order: Order) -> str:
+    """Format order number as ORD-XXX or ORD-XXX-R# for refills."""
+    parent_id = order.parent_order_id or 0
+    refill_no = order.refill_number or 0
+    root_id = parent_id if parent_id else order.id
+    base = f"ORD-{str(root_id).zfill(3)}"
+    return base + (f"-R{refill_no}" if refill_no > 0 else "")
+
+
 class EpacesDialog(QDialog):
     """
     Helper dialog for manually billing an order in the ePACES portal.
@@ -247,6 +256,8 @@ class EpacesDialog(QDialog):
                 return
             
             self.order = order
+            # Update window title with formatted order number
+            self.setWindowTitle(f"Bill in ePACES – {_format_order_number(order)}")
             self._bind_order_to_ui()
             
         except Exception as e:
@@ -331,15 +342,21 @@ class EpacesDialog(QDialog):
             row = self.items_table.rowCount()
             self.items_table.insertRow(row)
 
-            # Extract item data
-            hcpcs = item.hcpcs_code or ""
+            # Extract item data - show full HCPCS code if multi-code (contains +)
+            full_hcpcs = item.hcpcs_code or ""
+            if "+" in full_hcpcs:
+                # Multi-HCPCS code (e.g., E0244+E0243) - show full code without item suffix
+                display_hcpcs = full_hcpcs.split("-")[0] if "-" in full_hcpcs else full_hcpcs
+            else:
+                # Single HCPCS - show as-is (may include hyphen suffix for inventory matching)
+                display_hcpcs = full_hcpcs
             description = item.description or ""
             units = item.quantity
             unit_price = item.cost_ea or Decimal("0.00")
             line_total = item.total_cost or (unit_price * Decimal(str(units)))
 
             # Populate columns
-            self.items_table.setItem(row, 0, QTableWidgetItem(hcpcs))
+            self.items_table.setItem(row, 0, QTableWidgetItem(display_hcpcs))
             self.items_table.setItem(row, 1, QTableWidgetItem(description))
             self.items_table.setItem(row, 2, QTableWidgetItem(str(units)))
             self.items_table.setItem(row, 3, QTableWidgetItem(f"${line_total:.2f}"))

@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Optional
 
 from PyQt6.QtWidgets import QApplication
-from PyQt6.QtGui import QPalette, QColor
+from PyQt6.QtGui import QPalette, QColor, QFont
 
 
 def get_theme_path(theme_name: str = "dark") -> Path:
@@ -60,30 +60,22 @@ def load_stylesheet(theme_name: str = "dark") -> str:
 
 
 def apply_theme(app: QApplication, theme_name: str = "dark") -> None:
+    """Apply a unified theme to the entire application.
+
+    This sets the global font, loads the QSS stylesheet, and
+    applies a dark palette when requested.
     """
-    Apply a unified theme to the entire application.
-    
-    This sets both the stylesheet and the application palette for
-    consistent appearance across all widgets.
-    
-    Args:
-        app: QApplication instance
-        theme_name: Name of theme to apply ("dark" or "light")
-        
-    Example:
-        >>> app = QApplication(sys.argv)
-        >>> apply_theme(app, "dark")
-        >>> window = MainWindow()
-        >>> window.show()
-    """
+    # Apply typography baseline first
+    apply_typography(app)
+
     # Load and apply stylesheet
     stylesheet = load_stylesheet(theme_name)
     if stylesheet:
         app.setStyleSheet(stylesheet)
-        print(f"✓ Applied '{theme_name}' theme to application")
+        print(f" Applied '{theme_name}' theme to application")
     else:
-        print(f"✗ Failed to apply '{theme_name}' theme")
-    
+        print(f" Failed to apply '{theme_name}' theme")
+
     # Set application palette for better integration
     if theme_name == "dark":
         palette = create_dark_palette()
@@ -243,6 +235,18 @@ class ThemeTypography:
     FONT_WEIGHT_MEDIUM = "500"
     FONT_WEIGHT_SEMIBOLD = "600"
     FONT_WEIGHT_BOLD = "bold"
+
+
+def apply_typography(app: QApplication) -> None:
+    """Apply application-wide typography baseline.
+
+    Sets the global QApplication font based on ThemeTypography so
+    all widgets start from a consistent Segoe UI 9pt baseline.
+    """
+    font = QFont(ThemeTypography.FONT_FAMILY)
+    font.setPointSize(ThemeTypography.FONT_SIZE_BASE)
+    font.setWeight(QFont.Weight.Normal)
+    app.setFont(font)
 
 
 # Example usage and testing

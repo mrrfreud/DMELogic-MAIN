@@ -143,6 +143,78 @@ class PatientRepository:
             debug_log(f"PatientRepository.search_by_name error: {e}")
             return []
 
+    def search(self, query: Optional[str], limit: int = 50) -> List[Dict[str, Any]]:
+        """Search patients by phone number digits.
+
+        This helper is primarily used by the communications inbox to match
+        incoming numbers against patient phone fields. The search normalizes
+        both the incoming query and database values to digits-only strings so
+        formatting differences do not prevent matches.
+
+        Args:
+            query: Phone number string to match. Characters other than digits
+                   are ignored.
+            limit: Maximum number of rows to return.
+
+        Returns:
+            List of patient dicts whose primary or secondary phone matches.
+        """
+        if not query:
+            return []
+
+        digits_only = ''.join(ch for ch in query if ch.isdigit())
+        if not digits_only:
+            return []
+
+        def digits_expr(field: str) -> str:
+            """Return SQL expression that strips formatting from a phone field."""
+            return (
+                "REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE("
+                f"COALESCE({field}, ''), '-', ''), '(', ''), ')', ''), ' ', ''), '.', ''), '+', '')"
+            )
+
+        phone_expr = digits_expr('phone')
+        secondary_expr = digits_expr('secondary_contact')
+
+        try:
+            with self._get_connection() as conn:
+                conn.row_factory = sqlite3.Row
+                try:
+                    cursor = conn.execute(
+                        f"""
+                            SELECT *
+                            FROM patients
+                            WHERE {phone_expr} = ?
+                               OR {secondary_expr} = ?
+                            ORDER BY last_name COLLATE NOCASE ASC,
+                                     first_name COLLATE NOCASE ASC,
+                                     dob ASC
+                            LIMIT ?
+                        """,
+                        (digits_only, digits_only, limit)
+                    )
+                except sqlite3.OperationalError as exc:
+                    # Older databases may not have the secondary_contact column yet.
+                    if 'secondary_contact' not in str(exc).lower():
+                        raise
+                    cursor = conn.execute(
+                        f"""
+                            SELECT *
+                            FROM patients
+                            WHERE {phone_expr} = ?
+                            ORDER BY last_name COLLATE NOCASE ASC,
+                                     first_name COLLATE NOCASE ASC,
+                                     dob ASC
+                            LIMIT ?
+                        """,
+                        (digits_only, limit)
+                    )
+                rows = cursor.fetchall()
+                return rows_to_dicts(rows)
+        except Exception as e:
+            debug_log(f"PatientRepository.search error: {e}")
+            return []
+
 
 class PrescriberRepository:
     """

@@ -12,6 +12,8 @@ import sys
 from pathlib import Path
 
 from PyQt6.QtWidgets import QApplication
+from PyQt6.QtCore import Qt
+from PyQt6.QtGui import QGuiApplication
 
 # Import the first-run wizard
 from dmelogic.ui.first_run_wizard import run_first_run_wizard_if_needed, is_first_run
@@ -34,6 +36,12 @@ def main():
         log_db_diagnostics()
     except Exception:
         pass
+    
+    # Enable High DPI scaling for sharp fonts and modern appearance
+    # Note: Qt6 has High DPI enabled by default, just set the rounding policy
+    QApplication.setHighDpiScaleFactorRoundingPolicy(
+        Qt.HighDpiScaleFactorRoundingPolicy.PassThrough
+    )
     
     logging.info("USB Installer version - Creating QApplication...")
     qt_app = QApplication(sys.argv)

@@ -257,7 +257,7 @@ def init_users_db(folder_path: Optional[str] = None) -> None:
     
     conn.commit()
     conn.close()
-    print("✅ Users database initialized")
+    print("[OK] Users database initialized")
 
 
 def seed_default_roles_and_permissions(folder_path: Optional[str] = None) -> None:
@@ -293,7 +293,7 @@ def seed_default_roles_and_permissions(folder_path: Optional[str] = None) -> Non
     
     conn.commit()
     conn.close()
-    print("✅ Default roles and permissions seeded")
+    print("[OK] Default roles and permissions seeded")
 
 
 def ensure_admin_user(folder_path: Optional[str] = None) -> bool:
@@ -332,8 +332,8 @@ def ensure_admin_user(folder_path: Optional[str] = None) -> bool:
         
         conn.commit()
         conn.close()
-        print("✅ Default admin user created (username: admin, password: admin123)")
-        print("⚠️  Please change the admin password immediately!")
+        print("[OK] Default admin user created (username: admin, password: admin123)")
+        print("[WARNING] Please change the admin password immediately!")
         return True
     
     conn.close()

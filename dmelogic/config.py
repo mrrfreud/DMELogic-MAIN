@@ -49,6 +49,7 @@ DB_FILES = [
     "insurance_names.db",
     "insurance.db",
     "document_data.db",
+    "communications.db",
     # Add new databases here:
     # "claims.db",
     # "audit_log.db",

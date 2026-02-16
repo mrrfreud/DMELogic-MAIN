@@ -29,6 +29,9 @@ from PyQt6.QtWidgets import (
     QTreeWidget,
     QTreeWidgetItem,
     QScrollArea,
+    QFileDialog,
+    QListWidget,
+    QGroupBox,
 )
 from PyQt6.QtCore import QStringListModel
 from PyQt6.QtWidgets import QCompleter
@@ -191,6 +194,13 @@ class OrderWizardResult:
     prescriber_name: str
     prescriber_npi: str
     prescriber_phone: str
+    
+    # Second prescriber (for orders with multiple RXs from different doctors)
+    rx_date_2: str = ""
+    prescriber_name_2: str = ""
+    prescriber_npi_2: str = ""
+    prescriber_phone_2: str = ""
+    
     items: List[OrderItem] = field(default_factory=list)
 
     # diagnosis codes (up to 5)
@@ -222,6 +232,9 @@ class OrderWizardResult:
 
     # NEW: Flag to create order in On Hold status
     on_hold: bool = False
+
+    # NEW: Document attachment paths
+    attachment_paths: List[str] = field(default_factory=list)
 
 
 def _k_modifier_for_month(month: int) -> str | None:
@@ -396,6 +409,71 @@ class OrderWizard(QDialog):
         else:
             self.insurance_combo.setCurrentIndex(0)
 
+    # ---- Patient search / add helpers ---------------------------------------
+
+    def _on_search_patient(self) -> None:
+        """Open the Find Patient dialog and apply the selection to Step 1."""
+        try:
+            from dmelogic.ui.find_patient_dialog import FindPatientDialog
+
+            dialog = FindPatientDialog(self, folder_path=self.folder_path)
+
+            # Seed dialog with whatever the user has already typed
+            name = self.patient_name_edit.text().strip()
+            dob = self.patient_dob_edit.text().strip()
+            phone = self.patient_phone_edit.text().strip()
+            if hasattr(dialog, "set_initial_query"):
+                dialog.set_initial_query(name=name, dob=dob, phone=phone)
+
+            if dialog.exec() == QDialog.DialogCode.Accepted:
+                patient = dialog.get_selected_patient() or {}
+                if not patient:
+                    return
+
+                # Update internal patient id and reload DB-backed context
+                self.patient_id = int(patient.get("id", 0) or 0)
+
+                # Update visible fields on Step 1
+                last = (patient.get("last_name") or "").strip()
+                first = (patient.get("first_name") or "").strip()
+                display_name = f"{last}, {first}".strip(", ")
+                self.patient_name_edit.setText(display_name)
+                self.patient_dob_edit.setText(patient.get("dob", ""))
+                self.patient_phone_edit.setText(patient.get("phone", ""))
+
+                # Refresh full patient record + insurance combo
+                self._load_patient_for_wizard()
+                self._load_patient_insurance()
+        except Exception as e:
+            print(f"Error searching for patient from wizard: {e}")
+            import traceback
+            traceback.print_exc()
+            QMessageBox.warning(
+                self,
+                "Find Patient",
+                f"Could not open patient search: {e}",
+            )
+
+    def _on_add_patient(self) -> None:
+        """Delegate to the main window's Add Patient workflow."""
+        parent = self.parent()
+        try:
+            if parent and hasattr(parent, "add_new_patient"):
+                parent.add_new_patient()
+            else:
+                QMessageBox.information(
+                    self,
+                    "Add Patient",
+                    "Please add patients from the main Patients screen.",
+                )
+        except Exception as e:
+            print(f"Error launching Add Patient from wizard: {e}")
+            QMessageBox.warning(
+                self,
+                "Add Patient",
+                f"Could not open Add Patient workflow: {e}",
+            )
+
     def _maybe_link_orders_for_patient(self) -> None:
         """
         Check if patient has other refill-eligible orders and ask if we should link.
@@ -471,16 +549,66 @@ class OrderWizard(QDialog):
     # ------------------------- UI layout -------------------------
 
     def _build_ui(self) -> None:
-        layout = QVBoxLayout(self)
+        """Build the overall wizard chrome: sidebar + content card."""
+        from PyQt6.QtWidgets import QFrame
 
-        # Title strip
-        self.title_label = QLabel("Step 1 of 4 — Patient")
-        self.title_label.setStyleSheet("font-size: 13pt; font-weight: 600;")
-        layout.addWidget(self.title_label)
+        # Root layout for the dialog
+        root_layout = QVBoxLayout(self)
+        root_layout.setContentsMargins(20, 20, 20, 20)
+        root_layout.setSpacing(16)
 
-        # Stacked pages
+        # Two-column layout: left step list, right content card
+        main_row = QHBoxLayout()
+        main_row.setSpacing(16)
+        root_layout.addLayout(main_row, 1)
+
+        # --- Left: step indicator sidebar ---------------------------------
+        sidebar_frame = QFrame()
+        sidebar_frame.setObjectName("wizardSidebar")
+        sidebar_layout = QVBoxLayout(sidebar_frame)
+        sidebar_layout.setContentsMargins(16, 16, 16, 16)
+        sidebar_layout.setSpacing(8)
+
+        sidebar_title = QLabel("New Order")
+        sidebar_title.setProperty("role", "pageTitle")
+        sidebar_title.setProperty("typo", "title")
+        sidebar_layout.addWidget(sidebar_title)
+
+        sidebar_subtitle = QLabel("4 simple steps")
+        sidebar_subtitle.setProperty("role", "subtitle")
+        sidebar_subtitle.setProperty("typo", "caption")
+        sidebar_layout.addWidget(sidebar_subtitle)
+
+        sidebar_layout.addSpacing(12)
+
+        self._step_labels: list[QLabel] = []
+        step_titles = ["Patient", "RX / Prescriber", "Items", "Review & Finish"]
+        for idx, label in enumerate(step_titles):
+            step_label = QLabel(f"{idx + 1}. {label}")
+            step_label.setProperty("role", "wizardStep")
+            step_label.setProperty("stepIndex", idx)
+            self._step_labels.append(step_label)
+            sidebar_layout.addWidget(step_label)
+
+        sidebar_layout.addStretch(1)
+        main_row.addWidget(sidebar_frame)
+
+        # --- Right: main content card -------------------------------------
+        card_frame = QFrame()
+        card_frame.setObjectName("wizardCard")
+        card_layout = QVBoxLayout(card_frame)
+        card_layout.setContentsMargins(24, 20, 24, 20)
+        card_layout.setSpacing(12)
+
+        # Title strip inside the card
+        self.title_label = QLabel("Step 1 of 4  Patient")
+        self.title_label.setProperty("role", "pageTitle")
+        self.title_label.setProperty("typo", "section")
+        card_layout.addWidget(self.title_label)
+
+        # Stacked pages live inside the card
         self.stack = QStackedWidget()
-        layout.addWidget(self.stack, 1)
+        card_layout.addWidget(self.stack, 1)
 
         self._build_patient_page()
         self._build_rx_page()
@@ -495,8 +623,13 @@ class OrderWizard(QDialog):
         self.next_button = QPushButton("Next")
         self.finish_button = QPushButton("Finish")
         self.cancel_button = QPushButton("Cancel")
+
+        # Button hierarchy using existing theme classes
+        self.back_button.setProperty("class", "secondary")
+        self.cancel_button.setProperty("class", "secondary")
+        # Next and Finish use primary styling by default
         
-        # Order: Back → Next → Finish → Cancel
+        # Order: Back  Next  Finish  Cancel
         buttons_layout.addWidget(self.back_button)
         buttons_layout.addWidget(self.next_button)
         buttons_layout.addWidget(self.finish_button)
@@ -508,9 +641,10 @@ class OrderWizard(QDialog):
         self.finish_button.clicked.connect(self.finish)
         self.cancel_button.clicked.connect(self.reject)
 
-        layout.addLayout(buttons_layout)
+        card_layout.addLayout(buttons_layout)
+        main_row.addWidget(card_frame, 1)
 
-        # Connect currentChanged AFTER buttons exist
+        # Connect currentChanged AFTER buttons and step labels exist
         self.stack.currentChanged.connect(self._update_buttons)
         
         self._update_buttons()
@@ -519,11 +653,17 @@ class OrderWizard(QDialog):
 
     def _build_patient_page(self) -> None:
         page = QWidget()
-        layout = QFormLayout(page)
-        layout.setLabelAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-        layout.setContentsMargins(40, 20, 40, 20)
-        layout.setHorizontalSpacing(18)
-        layout.setVerticalSpacing(12)
+
+        # Use a vertical layout so we can place the form
+        # and then a dedicated Search/Add patient action row.
+        main_layout = QVBoxLayout(page)
+        main_layout.setContentsMargins(40, 20, 40, 20)
+        main_layout.setSpacing(12)
+
+        form = QFormLayout()
+        form.setLabelAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        form.setHorizontalSpacing(18)
+        form.setVerticalSpacing(12)
 
         self.patient_name_edit = QLineEdit()
         self.patient_name_edit.setPlaceholderText("LAST, FIRST")
@@ -541,10 +681,37 @@ class OrderWizard(QDialog):
         self.insurance_combo = QComboBox()
         self.insurance_combo.addItem("No insurance on file", None)
 
-        layout.addRow("Patient name:", self.patient_name_edit)
-        layout.addRow("Date of birth:", self.patient_dob_edit)
-        layout.addRow("Phone:", self.patient_phone_edit)
-        layout.addRow("Insurance:", self.insurance_combo)
+        form.addRow("Patient name:", self.patient_name_edit)
+        form.addRow("Date of birth:", self.patient_dob_edit)
+        form.addRow("Phone:", self.patient_phone_edit)
+        form.addRow("Insurance:", self.insurance_combo)
+
+        main_layout.addLayout(form)
+
+        # --- Search / Add patient action row ---------------------------------
+        actions_row = QHBoxLayout()
+        actions_row.setSpacing(10)
+
+        actions_label = QLabel("Find or add patient:")
+        actions_label.setStyleSheet("font-weight: 600;")
+        actions_row.addWidget(actions_label)
+
+        actions_row.addStretch(1)
+
+        self.search_patient_btn = QPushButton("Search patients…")
+        self.search_patient_btn.setToolTip("Search existing patients in the database")
+        self.search_patient_btn.clicked.connect(self._on_search_patient)
+        actions_row.addWidget(self.search_patient_btn)
+
+        self.add_patient_btn = QPushButton("Add new patient…")
+        self.add_patient_btn.setToolTip("Open the standard Add Patient workflow")
+        self.add_patient_btn.clicked.connect(self._on_add_patient)
+        actions_row.addWidget(self.add_patient_btn)
+
+        main_layout.addLayout(actions_row)
+
+        # Spacer so content stays toward the top
+        main_layout.addStretch(1)
 
         self.stack.addWidget(page)
         
@@ -650,6 +817,68 @@ class OrderWizard(QDialog):
         form.addRow("NPI:", self.prescriber_npi_edit)
         form.addRow("Phone:", self.prescriber_phone_edit)
 
+        # ---- Second Prescriber Section (Collapsible) ----
+        self.prescriber2_checkbox = QCheckBox("Add 2nd Prescriber / RX Date")
+        self.prescriber2_checkbox.setStyleSheet("font-weight: 500; color: #2563eb; margin-top: 10px;")
+        self.prescriber2_checkbox.setToolTip("Check this to add a second prescriber for orders with multiple RXs from different doctors")
+        form.addRow("", self.prescriber2_checkbox)
+
+        # Container for second prescriber fields
+        self.prescriber2_container = QWidget()
+        prescriber2_form = QFormLayout(self.prescriber2_container)
+        prescriber2_form.setLabelAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        prescriber2_form.setHorizontalSpacing(18)
+        prescriber2_form.setVerticalSpacing(8)
+        prescriber2_form.setContentsMargins(0, 0, 0, 0)
+
+        # RX Date 2
+        self.rx_date_2_edit = QDateEdit()
+        self.rx_date_2_edit.setCalendarPopup(True)
+        self.rx_date_2_edit.setDisplayFormat("MM/dd/yyyy")
+        self.rx_date_2_edit.setSpecialValueText("  ")
+        min_date = QDate(1900, 1, 1)
+        self.rx_date_2_edit.setMinimumDate(min_date)
+        self.rx_date_2_edit.setDate(min_date)
+        prescriber2_form.addRow("RX Date 2:", self.rx_date_2_edit)
+
+        # Second prescriber name with Search and Add buttons
+        self.prescriber_name_2_edit = QLineEdit()
+        self.prescriber_name_2_edit.setPlaceholderText("Prescriber 2 name (LAST, FIRST)")
+        self.prescriber_npi_2_edit = QLineEdit()
+        self.prescriber_npi_2_edit.setPlaceholderText("NPI")
+        self.prescriber_phone_2_edit = QLineEdit()
+        self.prescriber_phone_2_edit.setPlaceholderText("Phone")
+
+        prescriber2_layout = QHBoxLayout()
+        prescriber2_layout.setContentsMargins(0, 0, 0, 0)
+        prescriber2_layout.setSpacing(6)
+        prescriber2_layout.addWidget(self.prescriber_name_2_edit, 1)
+
+        self.search_prescriber_2_btn = QPushButton("Search…")
+        self.search_prescriber_2_btn.setToolTip("Search for prescriber in database")
+        self.search_prescriber_2_btn.clicked.connect(self._on_search_prescriber_2)
+        prescriber2_layout.addWidget(self.search_prescriber_2_btn)
+
+        self.add_prescriber_2_btn = QPushButton("➕ Add")
+        self.add_prescriber_2_btn.setToolTip("Add new prescriber to database")
+        self.add_prescriber_2_btn.clicked.connect(self._on_add_prescriber_2)
+        prescriber2_layout.addWidget(self.add_prescriber_2_btn)
+
+        prescriber2_widget = QWidget()
+        prescriber2_widget.setLayout(prescriber2_layout)
+
+        prescriber2_form.addRow("Prescriber 2:", prescriber2_widget)
+        prescriber2_form.addRow("NPI 2:", self.prescriber_npi_2_edit)
+        prescriber2_form.addRow("Phone 2:", self.prescriber_phone_2_edit)
+
+        # Initially hide second prescriber fields
+        self.prescriber2_container.setVisible(False)
+
+        # Toggle visibility when checkbox is checked
+        self.prescriber2_checkbox.toggled.connect(self.prescriber2_container.setVisible)
+
+        form.addRow("", self.prescriber2_container)
+
         # ---- Diagnosis codes ----
         self.dx_edits: list[QLineEdit] = []
         for i in range(5):
@@ -750,6 +979,64 @@ class OrderWizard(QDialog):
                 QMessageBox.information(
                     self, 
                     "Prescriber Added", 
+                    f"Prescriber {display_name} has been added successfully."
+                )
+        except Exception as e:
+            print(f"Error opening prescriber dialog: {e}")
+            import traceback
+            traceback.print_exc()
+            QMessageBox.warning(self, "Error", f"Failed to open prescriber dialog: {e}")
+
+    def _on_search_prescriber_2(self) -> None:
+        """Open prescriber search dialog for second prescriber."""
+        try:
+            folder_path = getattr(self.parent(), 'current_folder', None)
+            dialog = PrescriberSearchDialog(folder_path, self)
+
+            parent = self.parent()
+            if parent and hasattr(parent, 'register_child_window'):
+                parent.register_child_window(dialog)
+
+            initial_query = self.prescriber_name_2_edit.text().strip()
+            if initial_query and hasattr(dialog, 'set_initial_query'):
+                dialog.set_initial_query(initial_query)
+
+            def on_accepted():
+                prescriber = dialog.get_selected_prescriber()
+                if prescriber:
+                    display_name = f"{prescriber['last_name'].upper()}, {prescriber['first_name'].upper()}"
+                    self.prescriber_name_2_edit.setText(display_name)
+                    self.prescriber_npi_2_edit.setText(prescriber.get('npi') or "")
+                    self.prescriber_phone_2_edit.setText(prescriber.get('phone') or "")
+
+            dialog.accepted.connect(on_accepted)
+            dialog.show()
+            dialog.raise_()
+            dialog.activateWindow()
+
+        except Exception as e:
+            print(f"Error opening prescriber search: {e}")
+            import traceback
+            traceback.print_exc()
+            QMessageBox.warning(self, "Search Error", f"Failed to open prescriber search: {e}")
+
+    def _on_add_prescriber_2(self) -> None:
+        """Open the Add Prescriber dialog for second prescriber."""
+        try:
+            from app_legacy import PrescriberDialog
+
+            dialog = PrescriberDialog(self)
+            if dialog.exec() == QDialog.DialogCode.Accepted:
+                data = dialog.get_prescriber_data()
+                display_name = f"{data['last_name'].upper()}, {data['first_name'].upper()}"
+
+                self.prescriber_name_2_edit.setText(display_name)
+                self.prescriber_npi_2_edit.setText(data.get('npi_number') or "")
+                self.prescriber_phone_2_edit.setText(data.get('phone') or "")
+
+                QMessageBox.information(
+                    self,
+                    "Prescriber Added",
                     f"Prescriber {display_name} has been added successfully."
                 )
         except Exception as e:
@@ -1322,6 +1609,106 @@ class OrderWizard(QDialog):
         form.addRow("", self.on_hold_checkbox)
 
         layout.addLayout(form)
+
+        # ---------------------- Document Attachment Section ----------------------
+        attach_group = QGroupBox("Document Attachments")
+        attach_group.setStyleSheet("""
+            QGroupBox {
+                font-weight: 600;
+                border: 1px solid #d1d5db;
+                border-radius: 4px;
+                margin-top: 12px;
+                padding-top: 10px;
+            }
+            QGroupBox::title {
+                subcontrol-origin: margin;
+                left: 10px;
+                padding: 0 5px;
+            }
+        """)
+        attach_layout = QVBoxLayout(attach_group)
+        attach_layout.setSpacing(8)
+
+        # Info label
+        attach_info = QLabel("Attach RX/CMN documents to this order (required unless overridden)")
+        attach_info.setStyleSheet("color: #6b7280; font-size: 9pt;")
+        attach_layout.addWidget(attach_info)
+
+        # Attachment list
+        self.attachment_list = QListWidget()
+        self.attachment_list.setMaximumHeight(100)
+        self.attachment_list.setAlternatingRowColors(True)
+        self.attachment_list.setStyleSheet("""
+            QListWidget {
+                border: 1px solid #d1d5db;
+                border-radius: 3px;
+                background-color: #fafafa;
+            }
+            QListWidget::item {
+                padding: 4px;
+            }
+            QListWidget::item:alternate {
+                background-color: #f5f5f5;
+            }
+        """)
+        attach_layout.addWidget(self.attachment_list)
+
+        # Track attachment paths
+        self._attachment_paths: List[str] = []
+
+        # Buttons row
+        attach_btn_layout = QHBoxLayout()
+        attach_btn_layout.setSpacing(8)
+
+        self.attach_btn = QPushButton("📎 Attach Document...")
+        self.attach_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #2563eb;
+                color: white;
+                border: none;
+                padding: 6px 12px;
+                border-radius: 4px;
+                font-weight: 500;
+            }
+            QPushButton:hover {
+                background-color: #1d4ed8;
+            }
+        """)
+        self.attach_btn.clicked.connect(self._attach_document)
+        attach_btn_layout.addWidget(self.attach_btn)
+
+        self.remove_attach_btn = QPushButton("Remove Selected")
+        self.remove_attach_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #dc2626;
+                color: white;
+                border: none;
+                padding: 6px 12px;
+                border-radius: 4px;
+                font-weight: 500;
+            }
+            QPushButton:hover {
+                background-color: #b91c1c;
+            }
+        """)
+        self.remove_attach_btn.clicked.connect(self._remove_attachment)
+        attach_btn_layout.addWidget(self.remove_attach_btn)
+
+        attach_btn_layout.addStretch(1)
+        attach_layout.addLayout(attach_btn_layout)
+
+        # Skip attachment checkbox (override)
+        self.skip_attachment_checkbox = QCheckBox("Skip document attachment (create order without documents)")
+        self.skip_attachment_checkbox.setToolTip(
+            "Check this to create the order without attaching any documents.\n"
+            "Warning: Orders without documentation may be incomplete."
+        )
+        self.skip_attachment_checkbox.setStyleSheet("color: #dc2626; font-weight: 500; margin-top: 5px;")
+        attach_layout.addWidget(self.skip_attachment_checkbox)
+
+        layout.addWidget(attach_group)
+        # ---------------------- End Document Attachment Section ----------------------
+
         layout.addStretch(1)
 
         self.stack.addWidget(page)
@@ -1410,9 +1797,38 @@ class OrderWizard(QDialog):
         if not self._validate_current_page():
             return
 
+        # Require a real patient selection before finishing
+        if not getattr(self, "patient_id", 0):
+            QMessageBox.warning(
+                self,
+                "Patient Required",
+                "Please use 'Search patients…' or 'Add new patient…' on Step 1 to select a real patient before creating an order.",
+            )
+            # Jump back to Patient step to make it obvious
+            try:
+                self.stack.setCurrentIndex(0)
+                self._update_buttons()
+            except Exception:
+                pass
+            return
+
         items = self._collect_items()
         if not items:
             QMessageBox.warning(self, "Order", "Add at least one item to the order.")
+            return
+
+        # Validate document attachment requirement
+        has_attachments = bool(self._attachment_paths)
+        skip_attachments = self.skip_attachment_checkbox.isChecked()
+        
+        if not has_attachments and not skip_attachments:
+            QMessageBox.warning(
+                self,
+                "Documents Required",
+                "Please attach at least one document (RX/CMN) to this order.\n\n"
+                "If you need to create the order without documents, check the\n"
+                "'Skip document attachment' checkbox."
+            )
             return
 
         # Show confirmation dialog with items preview
@@ -1475,6 +1891,21 @@ class OrderWizard(QDialog):
             prescriber_name=self.prescriber_name_edit.text().strip(),
             prescriber_npi=self.prescriber_npi_edit.text().strip(),
             prescriber_phone=self.prescriber_phone_edit.text().strip(),
+            # Second prescriber (only if checkbox is checked and fields are filled)
+            rx_date_2=self.rx_date_2_edit.date().toString("MM/dd/yyyy") if (
+                hasattr(self, 'prescriber2_checkbox') and 
+                self.prescriber2_checkbox.isChecked() and 
+                self.rx_date_2_edit.date() != self.rx_date_2_edit.minimumDate()
+            ) else "",
+            prescriber_name_2=self.prescriber_name_2_edit.text().strip() if (
+                hasattr(self, 'prescriber2_checkbox') and self.prescriber2_checkbox.isChecked()
+            ) else "",
+            prescriber_npi_2=self.prescriber_npi_2_edit.text().strip() if (
+                hasattr(self, 'prescriber2_checkbox') and self.prescriber2_checkbox.isChecked()
+            ) else "",
+            prescriber_phone_2=self.prescriber_phone_2_edit.text().strip() if (
+                hasattr(self, 'prescriber2_checkbox') and self.prescriber2_checkbox.isChecked()
+            ) else "",
             items=items,
             icd_code_1=dx_values[0],
             icd_code_2=dx_values[1],
@@ -1495,8 +1926,74 @@ class OrderWizard(QDialog):
             insurance_group_number=insurance_group,
             refill_group_id=self._refill_group_id,
             on_hold=self.on_hold_checkbox.isChecked(),
+            attachment_paths=self._attachment_paths.copy(),
         )
         self.accept()
+
+    # ---------------------- Document Attachment Helpers ----------------------
+    def _attach_document(self) -> None:
+        """Open file dialog to select documents to attach."""
+        from pathlib import Path
+        
+        file_paths, _ = QFileDialog.getOpenFileNames(
+            self,
+            "Attach Documents",
+            "",
+            "Documents (*.pdf *.png *.jpg *.jpeg *.tif *.tiff *.doc *.docx);;All Files (*.*)"
+        )
+        
+        if not file_paths:
+            return
+        
+        for file_path in file_paths:
+            if file_path not in self._attachment_paths:
+                self._attachment_paths.append(file_path)
+                # Show just filename in list
+                display_name = Path(file_path).name
+                self.attachment_list.addItem(f"📄 {display_name}")
+        
+        # Update visual feedback
+        self._update_attachment_status()
+    
+    def _remove_attachment(self) -> None:
+        """Remove selected attachment from the list."""
+        current_row = self.attachment_list.currentRow()
+        if current_row >= 0:
+            self.attachment_list.takeItem(current_row)
+            del self._attachment_paths[current_row]
+            self._update_attachment_status()
+    
+    def _update_attachment_status(self) -> None:
+        """Update visual cues based on attachment state."""
+        has_attachments = bool(self._attachment_paths)
+        
+        # Update list background color based on state
+        if has_attachments:
+            self.attachment_list.setStyleSheet("""
+                QListWidget {
+                    border: 1px solid #22c55e;
+                    border-radius: 3px;
+                    background-color: #f0fdf4;
+                }
+                QListWidget::item {
+                    padding: 4px;
+                }
+            """)
+        else:
+            self.attachment_list.setStyleSheet("""
+                QListWidget {
+                    border: 1px solid #d1d5db;
+                    border-radius: 3px;
+                    background-color: #fafafa;
+                }
+                QListWidget::item {
+                    padding: 4px;
+                }
+                QListWidget::item:alternate {
+                    background-color: #f5f5f5;
+                }
+            """)
+    # ---------------------- End Document Attachment Helpers ----------------------
 
     def _update_buttons(self) -> None:
         index = self.stack.currentIndex()
@@ -1509,6 +2006,14 @@ class OrderWizard(QDialog):
         # Update title
         titles = ["Patient", "RX / Prescriber", "Items", "Review & Finish"]
         self.title_label.setText(f"Step {index + 1} of {total} — {titles[index]}")
+
+         # Highlight current step in the sidebar, if present
+        if hasattr(self, "_step_labels"):
+            for i, lbl in enumerate(self._step_labels):
+                lbl.setProperty("active", i == index)
+                # Refresh style so QSS reacts to the property change
+                lbl.style().unpolish(lbl)
+                lbl.style().polish(lbl)
 
         # Update patient info headers on all pages
         patient_name = self.patient_name_edit.text().strip()

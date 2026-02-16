@@ -11,7 +11,7 @@ from __future__ import annotations
 from datetime import date
 from typing import Iterable, Optional
 
-from dmelogic.db.base import UnitOfWork
+from dmelogic.db.base import UnitOfWork, ensure_writes_allowed
 from dmelogic.db import orders
 from dmelogic.config import debug_log
 
@@ -37,6 +37,9 @@ def process_refills(
     Returns:
         Count of successfully processed refills
 
+    Raises:
+        WritesBlockedError: If backup is in progress
+
     Business Rules:
         - Each refill creates a new order in 'Pending' status
         - Source item refills are decremented by 1
@@ -50,6 +53,9 @@ def process_refills(
         >>> count = process_refills(selected_ids, refill_fill_date='2025-12-10')
         >>> print(f"Processed {count} refills")
     """
+    # Check if writes are allowed (not blocked by backup)
+    ensure_writes_allowed()
+    
     if refill_fill_date is None:
         refill_fill_date = date.today().strftime("%Y-%m-%d")
 

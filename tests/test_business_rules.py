@@ -85,7 +85,7 @@ def test_status_workflow_transitions():
     test_cases = [
         (OrderStatus.PENDING, ["Docs Needed", "On Hold", "Cancelled", "Ready"]),
         (OrderStatus.DELIVERED, ["On Hold", "Billed"]),
-        (OrderStatus.BILLED, ["On Hold", "Paid", "Denied"]),
+        (OrderStatus.BILLED, [s.value for s in OrderStatus if s != OrderStatus.BILLED]),
     ]
     
     for current_status, expected_names in test_cases:

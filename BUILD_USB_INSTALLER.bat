@@ -22,23 +22,12 @@ pyinstaller --noconfirm ^
     --onedir ^
     --windowed ^
     --name=DMELogic ^
-    --icon=assets\DMELogic Icon.ico ^
     --add-data="assets;assets" ^
     --add-data="theme;theme" ^
     --hidden-import=PyQt6.QtCore ^
     --hidden-import=PyQt6.QtGui ^
     --hidden-import=PyQt6.QtWidgets ^
-    --hidden-import=PyQt6.QtPrintSupport ^
     --hidden-import=reportlab ^
-    --hidden-import=reportlab.lib ^
-    --hidden-import=reportlab.pdfgen ^
-    --hidden-import=reportlab.platypus ^
-    --hidden-import=openpyxl ^
-    --hidden-import=PIL ^
-    --hidden-import=PIL.Image ^
-    --hidden-import=fitz ^
-    --hidden-import=pytesseract ^
-    --collect-all=reportlab ^
     app_usb.py
 
 if errorlevel 1 (

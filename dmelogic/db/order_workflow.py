@@ -24,6 +24,7 @@ STATUS_TRANSITIONS: dict[OrderStatus, Set[OrderStatus]] = {
         OrderStatus.APPROVED,
         OrderStatus.DELIVERED,
         OrderStatus.SHIPPED,
+        OrderStatus.UNBILLED,
         OrderStatus.BILLED,
         OrderStatus.CANCELLED,
         OrderStatus.ON_HOLD,
@@ -32,6 +33,7 @@ STATUS_TRANSITIONS: dict[OrderStatus, Set[OrderStatus]] = {
     OrderStatus.DOCS_NEEDED: {
         OrderStatus.READY,
         OrderStatus.PENDING,
+        OrderStatus.UNBILLED,
         OrderStatus.CANCELLED,
         OrderStatus.ON_HOLD,
     },
@@ -40,6 +42,7 @@ STATUS_TRANSITIONS: dict[OrderStatus, Set[OrderStatus]] = {
         OrderStatus.SUBMITTED,
         OrderStatus.APPROVED,
         OrderStatus.DELIVERED,
+        OrderStatus.UNBILLED,
         OrderStatus.BILLED,  # allow direct billing when delivery already confirmed offline
         OrderStatus.CANCELLED,
         OrderStatus.ON_HOLD,
@@ -48,6 +51,7 @@ STATUS_TRANSITIONS: dict[OrderStatus, Set[OrderStatus]] = {
     OrderStatus.SUBMITTED: {
         OrderStatus.APPROVED,
         OrderStatus.DELIVERED,
+        OrderStatus.UNBILLED,
         OrderStatus.BILLED,
         OrderStatus.CANCELLED,
         OrderStatus.ON_HOLD,
@@ -66,12 +70,14 @@ STATUS_TRANSITIONS: dict[OrderStatus, Set[OrderStatus]] = {
         OrderStatus.PICKED_UP,
         OrderStatus.UNBILLED,
         OrderStatus.BILLED,
+        OrderStatus.PAID,       # Cash/direct payment
         OrderStatus.ON_HOLD,
     },
 
     OrderStatus.SHIPPED: {
         OrderStatus.UNBILLED,
         OrderStatus.BILLED,
+        OrderStatus.PAID,       # Cash/direct payment
         OrderStatus.PICKED_UP,
         OrderStatus.ON_HOLD,
     },
@@ -79,18 +85,31 @@ STATUS_TRANSITIONS: dict[OrderStatus, Set[OrderStatus]] = {
     OrderStatus.PICKED_UP: {
         OrderStatus.UNBILLED,
         OrderStatus.BILLED,
+        OrderStatus.PAID,       # Cash/direct payment
         OrderStatus.ON_HOLD,
     },
 
     OrderStatus.UNBILLED: {
         OrderStatus.BILLED,
+        OrderStatus.PAID,      # Manual payment marking (cash, etc.)
         OrderStatus.ON_HOLD,
         OrderStatus.CANCELLED,
     },
 
     OrderStatus.BILLED: {
-        OrderStatus.PAID,
+        OrderStatus.PENDING,
+        OrderStatus.DOCS_NEEDED,
+        OrderStatus.READY,
+        OrderStatus.SUBMITTED,
+        OrderStatus.APPROVED,
+        OrderStatus.DELIVERED,
+        OrderStatus.SHIPPED,
+        OrderStatus.PICKED_UP,
+        OrderStatus.UNBILLED,
+        OrderStatus.PAID,      # Payment received
         OrderStatus.DENIED,
+        OrderStatus.CLOSED,
+        OrderStatus.CANCELLED,
         OrderStatus.ON_HOLD,
     },
 
@@ -101,7 +120,20 @@ STATUS_TRANSITIONS: dict[OrderStatus, Set[OrderStatus]] = {
     },
 
     OrderStatus.PAID: {
+        # Allow corrections/reversals - paid orders can be moved to any status
+        OrderStatus.PENDING,
+        OrderStatus.DOCS_NEEDED,
+        OrderStatus.READY,
+        OrderStatus.SUBMITTED,
+        OrderStatus.APPROVED,
+        OrderStatus.DELIVERED,
+        OrderStatus.SHIPPED,
+        OrderStatus.PICKED_UP,
+        OrderStatus.UNBILLED,
+        OrderStatus.BILLED,
+        OrderStatus.DENIED,
         OrderStatus.CLOSED,
+        OrderStatus.CANCELLED,
         OrderStatus.ON_HOLD,
     },
 

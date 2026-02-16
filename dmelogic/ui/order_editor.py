@@ -279,6 +279,14 @@ class OrderEditorDialog(QDialog):
         self.prescriber_npi = QLabel()
         form_layout.addRow("NPI:", self.prescriber_npi)
         
+        self.prescriber_phone_input = QLineEdit()
+        self.prescriber_phone_input.setPlaceholderText("(555) 555-5555")
+        form_layout.addRow("Phone (for this order):", self.prescriber_phone_input)
+        
+        self.prescriber_fax_input = QLineEdit()
+        self.prescriber_fax_input.setPlaceholderText("(555) 555-5555")
+        form_layout.addRow("Fax (for this order):", self.prescriber_fax_input)
+        
         layout.addLayout(form_layout)
         
         # Change prescriber button
@@ -338,9 +346,23 @@ class OrderEditorDialog(QDialog):
         self.tracking_number.setPlaceholderText("Enter tracking number...")
         layout.addRow("Tracking #:", self.tracking_number)
         
-        self.icd_codes = QLabel()
-        self.icd_codes.setWordWrap(True)
-        layout.addRow("ICD-10 Codes:", self.icd_codes)
+        # ICD-10 Codes - editable fields
+        icd_container = QWidget()
+        icd_layout = QHBoxLayout(icd_container)
+        icd_layout.setContentsMargins(0, 0, 0, 0)
+        icd_layout.setSpacing(4)
+        
+        self.icd_code_fields = []
+        for i in range(5):
+            icd_field = QLineEdit()
+            icd_field.setPlaceholderText(f"ICD {i+1}")
+            icd_field.setMaximumWidth(100)
+            icd_field.textChanged.connect(self._on_text_changed)
+            self.icd_code_fields.append(icd_field)
+            icd_layout.addWidget(icd_field)
+        
+        icd_layout.addStretch()
+        layout.addRow("ICD-10 Codes:", icd_container)
         
         self.doctor_directions = QTextEdit()
         self.doctor_directions.setMaximumHeight(80)
@@ -355,20 +377,21 @@ class OrderEditorDialog(QDialog):
         layout = QVBoxLayout(group)
         
         self.items_table = QTableWidget()
-        self.items_table.setColumnCount(7)
+        self.items_table.setColumnCount(8)
         self.items_table.setHorizontalHeaderLabels([
-            "HCPCS", "Description", "Qty", "Refills", "Days", "Modifiers", "Cost"
+            "HCPCS", "Item #", "Description", "Qty", "Refills", "Days", "Modifiers", "Cost"
         ])
         
         # Set column widths
         header = self.items_table.horizontalHeader()
         header.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
-        header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
-        header.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
         header.setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
         header.setSectionResizeMode(4, QHeaderView.ResizeMode.ResizeToContents)
         header.setSectionResizeMode(5, QHeaderView.ResizeMode.ResizeToContents)
         header.setSectionResizeMode(6, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(7, QHeaderView.ResizeMode.ResizeToContents)
         
         self.items_table.setAlternatingRowColors(True)
         self.items_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
@@ -652,6 +675,12 @@ class OrderEditorDialog(QDialog):
         self.prescriber_npi.setText(
             self.order.prescriber_npi or "N/A"
         )
+        self.prescriber_phone_input.setText(
+            self.order.prescriber_phone or ""
+        )
+        self.prescriber_fax_input.setText(
+            self.order.prescriber_fax or ""
+        )
         
         # Insurance section - use legacy flat fields
         self.insurance_name.setText(
@@ -705,8 +734,19 @@ class OrderEditorDialog(QDialog):
         self.pickup_date.textChanged.connect(self._on_text_changed)
         self.tracking_number.textChanged.connect(self._on_text_changed)
         
-        icd_list = self.order.icd_codes
-        self.icd_codes.setText(", ".join(icd_list) if icd_list else "None")
+        # Populate ICD-10 code fields
+        icd_list = self.order.icd_codes or []
+        # Also check individual fields if list is empty
+        if not icd_list:
+            icd_list = [
+                getattr(self.order, 'icd_code_1', None) or '',
+                getattr(self.order, 'icd_code_2', None) or '',
+                getattr(self.order, 'icd_code_3', None) or '',
+                getattr(self.order, 'icd_code_4', None) or '',
+                getattr(self.order, 'icd_code_5', None) or '',
+            ]
+        for i, field in enumerate(self.icd_code_fields):
+            field.setText(icd_list[i].strip() if i < len(icd_list) else '')
         
         # Doctor directions (editable) - clear placeholder text if empty
         directions_text = self.order.doctor_directions or ""
@@ -761,12 +801,13 @@ class OrderEditorDialog(QDialog):
         days: str = "30",
         mods: str = "",
         cost: str = "0.00",
+        item_number: str = "",
     ):
         """Insert an item row with provided defaults and mark as new."""
         row = self.items_table.rowCount()
         self._suppress_item_change = True
         self.items_table.insertRow(row)
-        values = [hcpcs, desc, qty, refills, days, mods, cost]
+        values = [hcpcs, item_number, desc, qty, refills, days, mods, cost]  # Item # is column 1
         for col, val in enumerate(values):
             self.items_table.setItem(row, col, QTableWidgetItem(str(val)))
         self._item_row_meta.append({"id": None, "is_new": True})
@@ -786,7 +827,7 @@ class OrderEditorDialog(QDialog):
             if current_row >= 0:
                 seed = ""
                 hcpcs_item = self.items_table.item(current_row, 0)
-                desc_item = self.items_table.item(current_row, 1)
+                desc_item = self.items_table.item(current_row, 2)  # Column 2 is description now
                 if hcpcs_item and hcpcs_item.text().strip():
                     seed = hcpcs_item.text().strip()
                 elif desc_item and desc_item.text().strip():
@@ -803,12 +844,22 @@ class OrderEditorDialog(QDialog):
                     or ""
                 )
                 desc = str(data.get("description") or data.get("DESCRIPTION") or "")
-                cost_val = data.get("cost") or data.get("COST") or "0"
+                item_number = str(data.get("item_number") or data.get("ITEM_NUMBER") or "")
+                # Use retail_price (bill amount) for the cost field, fall back to cost if not set
+                bill_val = (
+                    data.get("retail_price")
+                    or data.get("RETAIL_PRICE")
+                    or data.get("bill_amount")
+                    or data.get("BILL_AMOUNT")
+                    or data.get("cost")
+                    or data.get("COST")
+                    or "0"
+                )
                 try:
-                    cost_val = f"{Decimal(str(cost_val)):.2f}"
+                    bill_val = f"{Decimal(str(bill_val)):.2f}"
                 except Exception:
-                    cost_val = "0.00"
-                self._insert_item_row(hcpcs_code, desc, "1", "0", "30", "", cost_val)
+                    bill_val = "0.00"
+                self._insert_item_row(hcpcs_code, desc, "1", "0", "30", "", bill_val, item_number)
         except Exception as exc:  # noqa: BLE001
             QMessageBox.warning(self, "Inventory", f"Could not open inventory search: {exc}")
 
@@ -855,12 +906,13 @@ class OrderEditorDialog(QDialog):
                 return item.text().strip() if item else ""
 
             hcpcs = _text(0)
-            desc = _text(1)
-            qty = _text(2)
-            refills = _text(3)
-            days = _text(4)
-            mods = _text(5)
-            cost = _text(6)
+            # Skip column 1 (Item #)
+            desc = _text(2)
+            qty = _text(3)
+            refills = _text(4)
+            days = _text(5)
+            mods = _text(6)
+            cost = _text(7)
             
             debug_log(f"[SAVE_ITEMS] Row {row}: meta={meta}, qty_text='{qty}', hcpcs='{hcpcs}'")
 
@@ -970,34 +1022,20 @@ class OrderEditorDialog(QDialog):
         QMessageBox.information(self, "Items Saved", "Item changes have been saved.")
     
     def _update_status_badge(self):
-        """Update status badge color and text."""
+        """Update status badge text and semantic properties for QSS."""
         if not self.order:
             return
-        
+
         status_text = self.order.order_status.value
         self.status_badge.setText(status_text)
-        
-        # Color coding based on status with appropriate text colors
-        status_styles = {
-            OrderStatus.PENDING: ("background-color: #FFA500; color: #1e1e1e;"),      # Orange with dark text
-            OrderStatus.DOCS_NEEDED: ("background-color: #FF6B6B; color: white;"),    # Red with white text
-            OrderStatus.READY: ("background-color: #4ECDC4; color: #1e1e1e;"),        # Teal with dark text
-            OrderStatus.DELIVERED: ("background-color: #95E1D3; color: #1e1e1e;"),    # Light green with dark text
-            OrderStatus.BILLED: ("background-color: #A8E6CF; color: #1e1e1e;"),       # Pale green with dark text
-            OrderStatus.PAID: ("background-color: #51CF66; color: white;"),           # Green with white text
-            OrderStatus.CLOSED: ("background-color: #868E96; color: white;"),         # Gray with white text
-            OrderStatus.CANCELLED: ("background-color: #DEE2E6; color: #1e1e1e;"),    # Light gray with dark text
-            OrderStatus.ON_HOLD: ("background-color: #FFD93D; color: #1e1e1e;"),      # Yellow with dark text
-            OrderStatus.DENIED: ("background-color: #FF6B9D; color: white;"),         # Pink with white text
-        }
-        
-        style = status_styles.get(self.order.order_status, "background-color: #666666; color: white;")
-        self.status_badge.setStyleSheet(
-            f"{style} "
-            f"padding: 5px 10px; "
-            f"border-radius: 3px; "
-            f"font-weight: bold;"
-        )
+
+        # Use semantic properties so global QSS can style consistently
+        self.status_badge.setProperty("badge", True)
+        self.status_badge.setProperty("status", self.order.order_status.name.lower())
+
+        # Force QSS refresh so changed properties take effect immediately
+        self.status_badge.style().unpolish(self.status_badge)
+        self.status_badge.style().polish(self.status_badge)
     
     def _populate_items_table(self):
         """Populate items table from order.items."""
@@ -1012,35 +1050,68 @@ class OrderEditorDialog(QDialog):
             row = self.items_table.rowCount()
             self.items_table.insertRow(row)
             
-            # HCPCS (read-only for existing rows)
-            hcpcs_item = QTableWidgetItem(item.hcpcs_code)
+            # HCPCS - show full code if multi-code (contains +), otherwise base code only
+            full_hcpcs = item.hcpcs_code or ""
+            if "+" in full_hcpcs:
+                # Multi-HCPCS code (e.g., E0244+E0243) - show full code
+                display_hcpcs = full_hcpcs.split("-")[0] if "-" in full_hcpcs else full_hcpcs
+            else:
+                # Single HCPCS - show base code only (first 5 chars)
+                display_hcpcs = full_hcpcs[:5] if len(full_hcpcs) >= 5 else full_hcpcs
+            hcpcs_item = QTableWidgetItem(display_hcpcs)
             hcpcs_item.setFlags(hcpcs_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
             self.items_table.setItem(row, 0, hcpcs_item)
+            
+            # Item # (from inventory, read-only)
+            item_number = getattr(item, "item_number", "") or ""
+            if not item_number and "-" in full_hcpcs:
+                # Extract from HCPCS and look up in inventory
+                try:
+                    from dmelogic.db.inventory import fetch_latest_item_by_hcpcs
+                    inv_data = fetch_latest_item_by_hcpcs(full_hcpcs, folder_path=self.folder_path)
+                    if inv_data and inv_data.get("item_number"):
+                        item_number = inv_data["item_number"]
+                    else:
+                        item_number = full_hcpcs.split("-", 1)[1].strip()
+                except Exception:
+                    item_number = full_hcpcs.split("-", 1)[1].strip() if "-" in full_hcpcs else ""
+            item_num_widget = QTableWidgetItem(item_number)
+            item_num_widget.setFlags(item_num_widget.flags() & ~Qt.ItemFlag.ItemIsEditable)
+            self.items_table.setItem(row, 1, item_num_widget)
             
             # Description (read-only for existing rows)
             desc_item = QTableWidgetItem(item.description)
             desc_item.setFlags(desc_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
-            self.items_table.setItem(row, 1, desc_item)
+            self.items_table.setItem(row, 2, desc_item)
             
             # Quantity
-            self.items_table.setItem(row, 2, QTableWidgetItem(str(item.quantity)))
+            self.items_table.setItem(row, 3, QTableWidgetItem(str(item.quantity)))
             
             # Refills
-            self.items_table.setItem(row, 3, QTableWidgetItem(str(item.refills)))
+            self.items_table.setItem(row, 4, QTableWidgetItem(str(item.refills)))
             
             # Days supply
-            self.items_table.setItem(row, 4, QTableWidgetItem(str(item.days_supply)))
+            self.items_table.setItem(row, 5, QTableWidgetItem(str(item.days_supply)))
             
             # Modifiers (free-text; will split on save)
             modifiers = format_modifiers_for_display(item)
-            self.items_table.setItem(row, 5, QTableWidgetItem(modifiers))
+            self.items_table.setItem(row, 6, QTableWidgetItem(modifiers))
             
             # Cost
             cost_val = item.cost_ea or Decimal("0")
             cost_text = f"{cost_val:.2f}"
-            self.items_table.setItem(row, 6, QTableWidgetItem(cost_text))
+            self.items_table.setItem(row, 7, QTableWidgetItem(cost_text))
 
-            self._item_row_meta.append({"id": item.id, "is_new": False})
+            # Store full metadata for sync with EPACES helper
+            self._item_row_meta.append({
+                "id": item.id,
+                "is_new": False,
+                "item_number": item_number,  # Use the item_number we just looked up/extracted
+                "pa_number": getattr(item, "pa_number", "") or "",
+                "directions": getattr(item, "directions", "") or "",
+                "is_rental": getattr(item, "is_rental", False),
+                "rental_month": getattr(item, "rental_month", 0),
+            })
         
         # Update total
         total = self.order.order_total
@@ -1384,19 +1455,23 @@ class OrderEditorDialog(QDialog):
             item_rows = [["HCPCS", "Description", "Qty", "Refills", "Days"]]
             if order.items:
                 for item in order.items:
-                    hcpcs = (item.hcpcs_code or '').strip()
+                    full_hcpcs = (item.hcpcs_code or '').strip()
                     # Prefer current inventory description if available; fallback to item snapshot
-                    desc = inv_desc_by_code.get(hcpcs.upper(), '').strip() or (item.description or '').strip()
+                    desc = inv_desc_by_code.get(full_hcpcs.upper(), '').strip() or (item.description or '').strip()
                     
-                    # If HCPCS has hyphen, split to get cleaner display
-                    if '-' in hcpcs:
-                        hcpcs = hcpcs.split('-')[0].strip()
+                    # Display full HCPCS code if multi-code (contains +), otherwise extract base code
+                    if '+' in full_hcpcs:
+                        # Multi-HCPCS code (e.g., E0244+E0243) - show full code without item suffix
+                        display_hcpcs = full_hcpcs.split('-')[0].strip() if '-' in full_hcpcs else full_hcpcs
+                    else:
+                        # Single HCPCS - remove item suffix after hyphen for cleaner display
+                        display_hcpcs = full_hcpcs.split('-')[0].strip() if '-' in full_hcpcs else full_hcpcs
                     
                     qty = str(item.quantity or 1)
                     refills = str(item.refills or 0)
                     days = str(item.days_supply or 0)
                     
-                    item_rows.append([hcpcs, desc, qty, refills, days])
+                    item_rows.append([display_hcpcs, desc, qty, refills, days])
             
             if len(item_rows) == 1:
                 item_rows.append(["-", "No items", "-", "-", "-"])
@@ -1410,8 +1485,13 @@ class OrderEditorDialog(QDialog):
                 textColor=colors.HexColor('#2c3e50')
             )
 
-            # File path
-            folder_path = self.folder_path or os.getcwd()
+            # File path - save to Downloads folder
+            try:
+                from pathlib import Path
+                downloads = str(Path.home() / "Downloads")
+                folder_path = downloads if os.path.exists(downloads) else str(Path.home())
+            except Exception:
+                folder_path = os.getcwd()
             ts = datetime.now().strftime('%Y%m%d_%H%M%S')
             order_num = self._format_order_number(order)
             out_name = f"DeliveryTicket_{order_num}_{ts}.pdf"
@@ -1760,7 +1840,7 @@ class OrderEditorDialog(QDialog):
             )
     
     def _attach_document(self):
-        """Attach a document to this order."""
+        """Attach a document to this order, all related orders (parent + refills), and patient profile."""
         if not self.order:
             return
         
@@ -1779,9 +1859,10 @@ class OrderEditorDialog(QDialog):
             return
         
         try:
-            # Create order documents folder
+            # Create order documents folder (use root order ID for consistency)
             from dmelogic.paths import fax_root
-            order_docs_dir = fax_root() / "OrderDocuments" / f"ORD-{self.order_id:03d}"
+            root_order_id = self.order.parent_order_id or self.order_id
+            order_docs_dir = fax_root() / "OrderDocuments" / f"ORD-{root_order_id:03d}"
             order_docs_dir.mkdir(parents=True, exist_ok=True)
             
             # Copy file to order folder
@@ -1798,31 +1879,53 @@ class OrderEditorDialog(QDialog):
             
             shutil.copy2(src, dest)
             
-            # Update order's attached_rx_files field
+            # Get all related order IDs (parent + all refills)
+            related_order_ids = self._get_related_order_ids()
+            
+            # Update attached_rx_files for ALL related orders
             import sqlite3
             conn = sqlite3.connect(self.orders_db_path)
             cur = conn.cursor()
-            cur.execute("SELECT attached_rx_files FROM orders WHERE id = ?", (self.order_id,))
-            row = cur.fetchone()
-            current_files = row[0] if row and row[0] else ""
             
-            # Append new file path
-            if current_files:
-                new_files = current_files + ";" + str(dest)
-            else:
-                new_files = str(dest)
+            attached_count = 0
+            for order_id in related_order_ids:
+                cur.execute("SELECT attached_rx_files FROM orders WHERE id = ?", (order_id,))
+                row = cur.fetchone()
+                current_files = row[0] if row and row[0] else ""
+                
+                # Check if file already attached to this order
+                existing_files = [f.strip() for f in current_files.replace('\n', ';').split(';') if f.strip()]
+                if str(dest) not in existing_files:
+                    # Append new file path
+                    if current_files:
+                        new_files = current_files + ";" + str(dest)
+                    else:
+                        new_files = str(dest)
+                    
+                    cur.execute("UPDATE orders SET attached_rx_files = ? WHERE id = ?", (new_files, order_id))
+                    attached_count += 1
             
-            cur.execute("UPDATE orders SET attached_rx_files = ? WHERE id = ?", (new_files, self.order_id))
             conn.commit()
             conn.close()
             
+            # Auto-attach to patient profile as well
+            self._auto_attach_to_patient(str(dest), src.name)
+            
             self._refresh_documents_list()
             
-            QMessageBox.information(
-                self,
-                "Document Attached",
-                f"Document attached successfully:\n{dest.name}"
-            )
+            # Build message showing what was attached
+            if len(related_order_ids) > 1:
+                order_list = ", ".join([f"ORD-{oid:03d}" for oid in related_order_ids[:3]])
+                if len(related_order_ids) > 3:
+                    order_list += f" (+{len(related_order_ids) - 3} more)"
+                msg = f"Document attached successfully:\n{dest.name}\n\n" \
+                      f"Linked to {len(related_order_ids)} orders: {order_list}\n" \
+                      f"(Also linked to patient profile)"
+            else:
+                msg = f"Document attached successfully:\n{dest.name}\n\n" \
+                      f"(Also linked to patient profile)"
+            
+            QMessageBox.information(self, "Document Attached", msg)
             
         except Exception as e:
             QMessageBox.critical(
@@ -1830,6 +1933,106 @@ class OrderEditorDialog(QDialog):
                 "Error",
                 f"Failed to attach document:\n{e}"
             )
+    
+    def _get_related_order_ids(self) -> list:
+        """Get all order IDs related to this order (parent + all refills in the family)."""
+        import sqlite3
+        
+        try:
+            conn = sqlite3.connect(self.orders_db_path)
+            cur = conn.cursor()
+            
+            # Determine the root order ID
+            root_order_id = self.order.parent_order_id or self.order_id
+            
+            # Get all orders in this family (root + all refills)
+            cur.execute(
+                "SELECT id FROM orders WHERE id = ? OR parent_order_id = ? ORDER BY id",
+                (root_order_id, root_order_id)
+            )
+            rows = cur.fetchall()
+            conn.close()
+            
+            return [row[0] for row in rows]
+        except Exception as e:
+            debug_log(f"Error getting related orders: {e}")
+            return [self.order_id]  # Fallback to just this order
+    
+    def _auto_attach_to_patient(self, file_path: str, original_filename: str):
+        """Auto-attach order document to the linked patient's profile."""
+        try:
+            import sqlite3
+            from pathlib import Path
+            
+            # Get patient_id from order
+            patient_id = getattr(self.order, 'patient_id', None)
+            
+            if not patient_id:
+                # Try to find patient by name and DOB
+                patient_db_path = resolve_db_path("patients.db", folder_path=self.folder_path)
+                conn = sqlite3.connect(patient_db_path)
+                cur = conn.cursor()
+                
+                # Try exact match first
+                cur.execute(
+                    "SELECT id FROM patients WHERE last_name = ? AND first_name = ? AND dob = ?",
+                    (
+                        self.order.patient_last_name or "",
+                        self.order.patient_first_name or "",
+                        str(self.order.patient_dob) if self.order.patient_dob else ""
+                    )
+                )
+                row = cur.fetchone()
+                if row:
+                    patient_id = row[0]
+                conn.close()
+            
+            if not patient_id:
+                debug_log(f"Cannot auto-attach to patient - patient_id not found for order {self.order_id}")
+                return
+            
+            # Insert into patient_documents
+            patient_db_path = resolve_db_path("patients.db", folder_path=self.folder_path)
+            conn = sqlite3.connect(patient_db_path)
+            cur = conn.cursor()
+            
+            # Ensure table exists
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS patient_documents (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    patient_id INTEGER NOT NULL,
+                    description TEXT,
+                    original_name TEXT,
+                    stored_path TEXT,
+                    created_at TEXT DEFAULT (datetime('now'))
+                )
+            """)
+            
+            # Check if already linked (avoid duplicates)
+            cur.execute(
+                "SELECT id FROM patient_documents WHERE patient_id = ? AND stored_path = ?",
+                (patient_id, file_path)
+            )
+            if cur.fetchone():
+                conn.close()
+                debug_log(f"Document already linked to patient {patient_id}")
+                return
+            
+            # Create description from order context
+            order_num = self._format_order_number(self.order)
+            description = f"From {order_num}"
+            
+            cur.execute(
+                "INSERT INTO patient_documents (patient_id, description, original_name, stored_path) VALUES (?, ?, ?, ?)",
+                (patient_id, description, original_filename, file_path)
+            )
+            conn.commit()
+            conn.close()
+            
+            debug_log(f"✅ Auto-attached document to patient {patient_id}: {original_filename}")
+            
+        except Exception as e:
+            debug_log(f"⚠️ Failed to auto-attach document to patient: {e}")
     
     def _refresh_documents_list(self):
         """Refresh the documents list for this order."""
@@ -1954,12 +2157,95 @@ class OrderEditorDialog(QDialog):
                 f"Failed to remove document:\n{e}"
             )
 
+    def _sync_items_from_table(self):
+        """Sync current UI table state to self.order.items so EPACES helper shows current data."""
+        if not self.order:
+            return
+        
+        from decimal import Decimal
+        
+        updated_items = []
+        for row in range(self.items_table.rowCount()):
+            meta = self._item_row_meta[row] if row < len(self._item_row_meta) else {"id": None}
+            
+            def _text(c: int) -> str:
+                item = self.items_table.item(row, c)
+                return item.text().strip() if item else ""
+            
+            hcpcs = _text(0)
+            item_num = _text(1)  # Item # column
+            desc = _text(2)
+            qty_str = _text(3)
+            refills_str = _text(4)
+            days_str = _text(5)
+            mods = _text(6)
+            cost_str = _text(7)
+            
+            # Skip empty rows
+            if not hcpcs and not desc:
+                continue
+            
+            # Parse values
+            try:
+                qty_val = int(qty_str) if qty_str else 0
+            except ValueError:
+                qty_val = 0
+            
+            try:
+                refills_val = int(refills_str) if refills_str else 0
+            except ValueError:
+                refills_val = 0
+            
+            try:
+                days_val = int(days_str) if days_str else 30
+            except ValueError:
+                days_val = 30
+            
+            try:
+                cost_val = Decimal(cost_str) if cost_str else Decimal("0")
+            except Exception:
+                cost_val = Decimal("0")
+            
+            total_val = cost_val * Decimal(str(qty_val)) if qty_val else Decimal("0")
+            
+            # Parse modifiers
+            mod_parts = [m for m in mods.replace(",", " ").split() if m]
+            
+            # Create OrderItem with current table values
+            order_item = OrderItem(
+                id=meta.get("id"),
+                order_id=self.order.id,
+                hcpcs_code=hcpcs,
+                description=desc,
+                quantity=qty_val,
+                refills=refills_val,
+                days_supply=days_val,
+                cost_ea=cost_val,
+                total_cost=total_val,
+                modifier1=mod_parts[0] if len(mod_parts) > 0 else None,
+                modifier2=mod_parts[1] if len(mod_parts) > 1 else None,
+                modifier3=mod_parts[2] if len(mod_parts) > 2 else None,
+                modifier4=mod_parts[3] if len(mod_parts) > 3 else None,
+                item_number=item_num or meta.get("item_number") or "",
+                pa_number=meta.get("pa_number") or "",
+                directions=meta.get("directions") or "",
+                is_rental=meta.get("is_rental", False),
+                rental_month=meta.get("rental_month", 0),
+            )
+            updated_items.append(order_item)
+        
+        # Update order's items list with current table state
+        self.order.items = updated_items
+
     def _open_epaces_helper(self):
         """Open the ePACES billing helper dialog (modal)."""
         if not self.order:
             return
         
         try:
+            # Sync current table items to order before opening helper
+            self._sync_items_from_table()
+            
             dialog = EpacesHelperDialog(
                 order=self.order,
                 folder_path=self.folder_path,
@@ -1979,6 +2265,19 @@ class OrderEditorDialog(QDialog):
             return
         
         try:
+            # Sync current table items to order before opening helper
+            self._sync_items_from_table()
+            
+            # If dialog already exists and is visible, refresh it instead of creating new
+            if hasattr(self, '_epaces_dialog') and self._epaces_dialog is not None:
+                try:
+                    if self._epaces_dialog.isVisible():
+                        self._epaces_dialog.refresh_order(self.order)
+                        return
+                except RuntimeError:
+                    # Dialog was deleted, create new one
+                    pass
+            
             # Store dialog instance to prevent garbage collection
             self._epaces_dialog = EpacesHelperDialog(
                 order=self.order,
@@ -2007,6 +2306,8 @@ class OrderEditorDialog(QDialog):
             # Update order's prescriber info using correct model attributes
             self.order.prescriber_name = f"{prescriber.get('last_name', '').upper()}, {prescriber.get('first_name', '').upper()}"
             self.order.prescriber_npi = prescriber.get('npi_number') or ""
+            self.order.prescriber_phone = prescriber.get('phone') or ""
+            self.order.prescriber_fax = prescriber.get('fax') or ""
             
             # Mark prescriber as changed for save
             self._prescriber_changed = True
@@ -2014,6 +2315,8 @@ class OrderEditorDialog(QDialog):
             # Update display
             self.prescriber_name.setText(self.order.prescriber_name)
             self.prescriber_npi.setText(self.order.prescriber_npi or "N/A")
+            self.prescriber_phone_input.setText(self.order.prescriber_phone or "")
+            self.prescriber_fax_input.setText(self.order.prescriber_fax or "")
             
             # Mark as changed
             self.save_button.setEnabled(True)
@@ -2233,6 +2536,27 @@ class OrderEditorDialog(QDialog):
             if (new_tracking or "") != orig_tracking:
                 fields_to_update["tracking_number"] = new_tracking
             
+            # Check prescriber phone/fax changes
+            new_prescriber_phone = self.prescriber_phone_input.text().strip()
+            orig_prescriber_phone = (self.order.prescriber_phone or "").strip()
+            if new_prescriber_phone != orig_prescriber_phone:
+                fields_to_update["prescriber_phone"] = new_prescriber_phone or None
+            
+            new_prescriber_fax = self.prescriber_fax_input.text().strip()
+            orig_prescriber_fax = (self.order.prescriber_fax or "").strip()
+            if new_prescriber_fax != orig_prescriber_fax:
+                fields_to_update["prescriber_fax"] = new_prescriber_fax or None
+            
+            # Check ICD-10 code changes
+            for i, field in enumerate(self.icd_code_fields, 1):
+                new_icd = field.text().strip().upper() or None
+                orig_icd = (getattr(self.order, f'icd_code_{i}', None) or "").strip()
+                # Also check from icd_codes list
+                if not orig_icd and self.order.icd_codes and i-1 < len(self.order.icd_codes):
+                    orig_icd = (self.order.icd_codes[i-1] or "").strip()
+                if (new_icd or "") != orig_icd:
+                    fields_to_update[f"icd_code_{i}"] = new_icd
+            
             if new_directions != orig_directions and new_directions != "No directions provided":
                 fields_to_update["doctor_directions"] = new_directions if new_directions else None
             if new_notes != orig_notes and new_notes != "No notes":
@@ -2285,6 +2609,19 @@ class OrderEditorDialog(QDialog):
                     self.order.tracking_number = fields_to_update["tracking_number"]
                 if "special_instructions" in fields_to_update:
                     self.order.special_instructions = fields_to_update["special_instructions"]
+                # Update prescriber phone/fax in local order object
+                if "prescriber_phone" in fields_to_update:
+                    self.order.prescriber_phone = fields_to_update["prescriber_phone"]
+                if "prescriber_fax" in fields_to_update:
+                    self.order.prescriber_fax = fields_to_update["prescriber_fax"]
+                # Update ICD code fields in local order object
+                for i in range(1, 6):
+                    field_name = f"icd_code_{i}"
+                    if field_name in fields_to_update:
+                        setattr(self.order, field_name, fields_to_update[field_name])
+                # Update the icd_codes list as well
+                new_icd_list = [f.text().strip().upper() for f in self.icd_code_fields if f.text().strip()]
+                self.order.icd_codes = new_icd_list
             
             QMessageBox.information(
                 self,

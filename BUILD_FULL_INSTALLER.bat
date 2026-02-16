@@ -14,18 +14,9 @@ echo Step 1: Activating virtual environment...
 call .venv\Scripts\activate.bat
 
 echo.
-echo Step 2: Building executable with PyInstaller...
+echo Step 2: Building executable with PyInstaller (using DMELogic.spec)...
 echo.
-pyinstaller --noconfirm ^
-    --onedir ^
-    --windowed ^
-    --name=DMELogic ^
-    --add-data="assets;assets" ^
-    --hidden-import=PyQt6.QtCore ^
-    --hidden-import=PyQt6.QtGui ^
-    --hidden-import=PyQt6.QtWidgets ^
-    --hidden-import=reportlab ^
-    app.py
+pyinstaller --noconfirm DMELogic.spec
 
 if errorlevel 1 (
     echo.
@@ -55,7 +46,7 @@ if exist "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" (
     echo ============================================
     echo.
     echo Your installer is ready:
-    echo installer_output\DMELogic_Setup_2.0.20.66.exe
+    echo installer_output\DMELogic_Update_2.0.20.169.exe
     echo.
     echo This installer will:
     echo - Remove old shortcuts

@@ -263,7 +263,7 @@ class RefillWorkflowService:
             source.get('diagnosis_code', ''),
             source.get('primary_insurance', ''),
             source.get('secondary_insurance', ''),
-            'Refill',  # Status
+            'Unbilled',  # Always start refills in the Unbilled workflow state
             source.get('order_id'),  # Link to original order
             f"Refill - {remaining_refills} refills remaining"
         ))

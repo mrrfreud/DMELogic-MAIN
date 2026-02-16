@@ -601,7 +601,9 @@ def update_order_fields(order_id: int, fields: dict, folder_path: Optional[str] 
     # Allowed fields to prevent SQL injection
     allowed_fields = {
         "doctor_directions", "notes", "patient_address", "tracking_number",
-        "special_instructions", "rx_date", "order_date", "delivery_date", "pickup_date"
+        "special_instructions", "rx_date", "order_date", "delivery_date", "pickup_date",
+        "icd_code_1", "icd_code_2", "icd_code_3", "icd_code_4", "icd_code_5",
+        "prescriber_phone", "prescriber_fax"
     }
     update_fields = {k: v for k, v in fields.items() if k in allowed_fields}
     
@@ -1047,6 +1049,9 @@ def create_order(order_input: OrderInput, folder_path: Optional[str] = None, con
                 patient_name,
                 prescriber_name,
                 prescriber_npi,
+                rx_date_2,
+                prescriber_name_2,
+                prescriber_npi_2,
                 primary_insurance,
                 primary_insurance_id,
                 billing_selection,
@@ -1062,7 +1067,7 @@ def create_order(order_input: OrderInput, folder_path: Optional[str] = None, con
                 parent_order_id,
                 refill_number
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 rx_date_str,
@@ -1076,6 +1081,9 @@ def create_order(order_input: OrderInput, folder_path: Optional[str] = None, con
                 order_input.patient_full_name,
                 order_input.prescriber_name or None,
                 order_input.prescriber_npi or None,
+                order_input.rx_date_2 or None,
+                order_input.prescriber_name_2 or None,
+                order_input.prescriber_npi_2 or None,
                 order_input.primary_insurance or None,
                 order_input.primary_insurance_id or None,
                 order_input.billing_type,
@@ -1235,7 +1243,7 @@ def create_order_from_wizard_result(
         
         # Extract on_hold flag if provided
         on_hold = getattr(result, "on_hold", False)
-        initial_status = "On Hold" if on_hold else "Pending"
+        initial_status = "On Hold" if on_hold else "Unbilled"
 
         # Basic header insert – we only fill a subset of columns; the rest stay NULL/default.
         cur.execute(
@@ -1279,7 +1287,7 @@ def create_order_from_wizard_result(
                 prescriber_name or None,
                 prescriber_npi or None,
                 billing_selection or None,
-                initial_status,                # "Pending" or "On Hold"
+                initial_status,                # "Unbilled" or "On Hold"
                 delivery_date or None,
                 notes or None,
                 primary_insurance or None,
@@ -1428,7 +1436,7 @@ def create_order_from_wizard_result_uow(
         
         # Extract on_hold flag if provided
         on_hold = getattr(result, "on_hold", False)
-        initial_status = "On Hold" if on_hold else "Pending"
+        initial_status = "On Hold" if on_hold else "Unbilled"
 
         # Basic header insert
         cur.execute(
@@ -1464,7 +1472,7 @@ def create_order_from_wizard_result_uow(
                 prescriber_name or None,
                 prescriber_npi or None,
                 billing_selection or None,
-                initial_status,                # "Pending" or "On Hold"
+                initial_status,                # "Unbilled" or "On Hold"
                 delivery_date or None,
                 notes or None,
                 None,  # parent_order_id
@@ -1598,7 +1606,9 @@ def fetch_order_item_with_header(
                 o.primary_insurance_id,
                 o.secondary_insurance,
                 o.secondary_insurance_id,
-                o.order_status
+                o.order_status,
+                o.parent_order_id,
+                o.refill_number
             FROM order_items oi
             JOIN orders o ON oi.order_id = o.id
             WHERE oi.rowid = ?
@@ -1648,6 +1658,20 @@ def create_refill_order_from_source(
     try:
         cur = conn.cursor()
 
+        # Compute parent_order_id and refill_number for proper chain tracking
+        # The base order is either the parent of the source, or the source itself
+        src_parent_id = src.get("parent_order_id") or 0
+        src_order_id = src.get("order_id")
+        base_order_id = src_parent_id if src_parent_id else src_order_id
+        
+        # Get max refill number in chain and increment
+        cur.execute(
+            "SELECT MAX(refill_number) FROM orders WHERE parent_order_id = ? OR id = ?",
+            (base_order_id, base_order_id),
+        )
+        (max_refill,) = cur.fetchone()
+        next_refill_number = (int(max_refill) if max_refill is not None else 0) + 1
+
         # 1. Create new order header
         cur.execute(
             """
@@ -1668,9 +1692,11 @@ def create_refill_order_from_source(
                 diagnosis_code,
                 primary_insurance,
                 secondary_insurance,
-                status,
-                created_date
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Pending', ?)
+                order_status,
+                created_date,
+                parent_order_id,
+                refill_number
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 fill_date,
@@ -1689,10 +1715,36 @@ def create_refill_order_from_source(
                 src.get("diagnosis_code", ""),
                 src.get("primary_insurance", ""),
                 src.get("secondary_insurance", ""),
+                "Unbilled",
                 fill_date,  # created_date
+                base_order_id,  # parent_order_id - points to original order
+                next_refill_number,  # refill_number - increments for each refill
             ),
         )
         new_order_id = cur.lastrowid
+
+        # Force all status/billing flags to the fresh Unbilled state so we never inherit
+        # workflow progress from the source order, even if legacy columns exist.
+        cur.execute(
+            """
+            UPDATE orders
+               SET order_status = ?,
+                   billed = 0,
+                   paid = 0,
+                   paid_date = NULL,
+                   updated_date = CURRENT_TIMESTAMP
+             WHERE id = ?
+            """,
+            ("Unbilled", new_order_id),
+        )
+        try:
+            cur.execute(
+                "UPDATE orders SET status = ? WHERE id = ?",
+                ("Unbilled", new_order_id),
+            )
+        except sqlite3.OperationalError:
+            # Legacy databases may not have the old 'status' column anymore.
+            pass
 
         # 2. Create new order_item with decremented refills
         current_refills = safe_int(src.get("refills", "0"))

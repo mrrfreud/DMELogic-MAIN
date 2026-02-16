@@ -169,7 +169,14 @@ class InventorySearchDialog(QDialog):
             category = data.get("category") or data.get("CATEGORY") or ""
             brand = data.get("brand") or data.get("BRAND") or ""
             cost = data.get("cost") or data.get("COST") or ""
-            bill = data.get("bill_amount") or data.get("BILL_AMOUNT") or ""
+            # Bill amount is stored as retail_price in inventory table
+            bill = (
+                data.get("retail_price")
+                or data.get("RETAIL_PRICE")
+                or data.get("bill_amount")
+                or data.get("BILL_AMOUNT")
+                or ""
+            )
 
             item = QTreeWidgetItem(
                 [
@@ -255,17 +262,89 @@ class InventorySearchDialog(QDialog):
             self.search_edit.setText(text)
     
     def on_add_new_item(self) -> None:
-        """Open a non-modal dialog to add a new inventory item."""
+        """Open a dialog to add a new inventory item, then refresh the list."""
         try:
-            # Check if parent has add_inventory_item method
-            if hasattr(self.parent(), 'open_add_inventory_dialog'):
-                self.parent().open_add_inventory_dialog()
-            else:
-                QMessageBox.information(
-                    self,
-                    "Add Inventory",
-                    "Please use the main Inventory tab to add new items."
-                )
+            # Import the dialog class
+            from app_legacy import InventoryItemDialog
+            
+            # Create and show the dialog
+            dialog = InventoryItemDialog(self)
+            dialog.setWindowTitle("Add New Inventory Item")
+            
+            # Connect to refresh when accepted
+            def on_item_added():
+                item_data = dialog.get_item_data()
+                if not item_data:
+                    return
+                
+                try:
+                    # Get the database file path from parent
+                    if hasattr(self.parent(), 'inventory_database_file'):
+                        db_file = self.parent().inventory_database_file
+                    else:
+                        import os
+                        db_file = os.path.join(
+                            os.path.expandvars(r"%PROGRAMDATA%"),
+                            "DMELogic",
+                            "Data",
+                            "inventory.db"
+                        )
+                    
+                    # Save to database
+                    import sqlite3
+                    conn = sqlite3.connect(db_file)
+                    cursor = conn.cursor()
+                    
+                    cursor.execute("""
+                        INSERT INTO inventory (
+                            hcpcs_code, description, category, cost, retail_price,
+                            brand, stock_quantity, reorder_level, supplier, notes,
+                            created_at, item_number
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), ?)
+                    """, (
+                        item_data.get('hcpcs_code', ''),
+                        item_data.get('description', ''),
+                        item_data.get('category', ''),
+                        item_data.get('cost', 0),
+                        item_data.get('bill_amount', 0),  # This goes into retail_price column
+                        item_data.get('brand', ''),
+                        item_data.get('stock_quantity', 0),
+                        item_data.get('reorder_level', 0),
+                        item_data.get('source', ''),
+                        item_data.get('notes', ''),
+                        item_data.get('item_number', '')
+                    ))
+                    
+                    conn.commit()
+                    conn.close()
+                    
+                    # Reload all items to include the new one
+                    self.load_all_items()
+                    
+                    # Set search to the new item's HCPCS so it's easy to find
+                    hcpcs = item_data.get('hcpcs_code', '')
+                    if hcpcs:
+                        self.search_edit.setText(hcpcs)
+                    
+                    # Show success message
+                    QMessageBox.information(
+                        self,
+                        "Item Added",
+                        f"Successfully added: {hcpcs} - {item_data.get('description', '')}"
+                    )
+                    
+                except Exception as e:
+                    QMessageBox.critical(
+                        self,
+                        "Error",
+                        f"Failed to add inventory item: {e}"
+                    )
+            
+            dialog.accepted.connect(on_item_added)
+            
+            # Show modally so user completes the add before continuing
+            dialog.exec()
+            
         except Exception as e:
             QMessageBox.warning(
                 self,

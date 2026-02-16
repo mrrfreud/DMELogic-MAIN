@@ -2,7 +2,7 @@
 ; Download Inno Setup from: https://jrsoftware.org/isdl.php
 
 #define MyAppName "DMELogic"
-#define MyAppVersion "2.0.20.137"
+#define MyAppVersion "2.0.20.191"
 #define MyAppPublisher "DME Solutions"
 #define MyAppExeName "DMELogic.exe"
 #define MyAppURL "https://github.com/mrrfreud/DMELogic-Refactored"
@@ -20,8 +20,8 @@ DefaultDirName={localappdata}\Programs\{#MyAppName}
 DefaultGroupName={#MyAppName}
 AllowNoIcons=yes
 OutputDir=installer_output
-OutputBaseFilename=DMELogic_Setup_{#MyAppVersion}
-SetupIconFile=assets\DMELogic Icon.ico
+OutputBaseFilename=DMELogic_Update_{#MyAppVersion}
+SetupIconFile="assets\DMELogic Icon.ico"
 Compression=lzma
 SolidCompression=yes
 WizardStyle=modern
@@ -73,6 +73,25 @@ Filename: "{app}\{#MyAppExeName}"; Description: "{cm:LaunchProgram,{#StringChang
 Type: files; Name: "{autodesktop}\DME Manager Pro.lnk"
 Type: files; Name: "{autodesktop}\DmeSolutionsV1.lnk"
 Type: files; Name: "{group}\DME Manager Pro.lnk"
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 

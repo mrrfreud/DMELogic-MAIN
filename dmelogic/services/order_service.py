@@ -17,7 +17,7 @@ from datetime import datetime
 from typing import TYPE_CHECKING, Optional
 import sqlite3
 
-from dmelogic.db.base import UnitOfWork
+from dmelogic.db.base import UnitOfWork, ensure_writes_allowed
 from dmelogic.db.orders import create_order_from_wizard_result_uow
 from dmelogic.db.patients import fetch_patient_insurance
 from dmelogic.db.inventory import fetch_latest_item_by_hcpcs
@@ -51,6 +51,9 @@ def create_order_with_enrichment(
     Returns:
         The created order ID
         
+    Raises:
+        WritesBlockedError: If backup is in progress
+        
     Business Logic:
         - Pulls insurance from patients.db if not provided
         - Looks up inventory costs and item numbers
@@ -58,6 +61,9 @@ def create_order_with_enrichment(
         - Updates order items with enriched data
         - All DB access through repositories with injected connections
     """
+    # Check if writes are allowed (not blocked by backup)
+    ensure_writes_allowed()
+    
     try:
         with UnitOfWork(folder_path=folder_path) as uow:
             # --- Split patient name "LAST, FIRST" ---
@@ -194,11 +200,17 @@ def delete_order_with_audit(
         deleted_by: User/system identifier
         folder_path: Optional database folder path
         
+    Raises:
+        WritesBlockedError: If backup is in progress
+        
     Business Logic:
         - Cascading delete (items first, then header)
         - Audit trail for compliance
         - Atomic operation via UoW
     """
+    # Check if writes are allowed (not blocked by backup)
+    ensure_writes_allowed()
+    
     try:
         with UnitOfWork(folder_path=folder_path) as uow:
             orders_conn = uow.connection("orders.db")

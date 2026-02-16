@@ -11,7 +11,7 @@
    - Wait for the build to complete
 
 3. **Your installer will be created at**:
-   - `installer_output\DMELogic_Setup_2.0.20.66.exe`
+   - `installer_output\DMELogic_Update_2.0.20.152.exe`
 
 ## What the Installer Does
 

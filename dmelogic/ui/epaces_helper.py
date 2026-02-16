@@ -43,6 +43,18 @@ def _make_value_copier(value: str):
     return _slot
 
 
+def _format_order_number(order: Order) -> str:
+    """Format order number with refill suffix if applicable.
+    
+    Returns: ORD-XXX for regular orders, ORD-XXX-R# for refills.
+    """
+    parent_id = order.parent_order_id or 0
+    refill_no = order.refill_number or 0
+    root_id = parent_id if parent_id else order.id
+    base = f"ORD-{str(root_id).zfill(3)}"
+    return base + (f"-R{refill_no}" if refill_no > 0 else "")
+
+
 class EpacesHelperDialog(QDialog):
     """
     Helper dialog for manually billing an order in ePACES.
@@ -96,7 +108,7 @@ class EpacesHelperDialog(QDialog):
         self._pa_edits: dict[int, QLineEdit] = {}
 
         self.setObjectName("EpacesHelperDialog")
-        self.setWindowTitle(f"EPACES – Order {order.id}")
+        self.setWindowTitle(f"EPACES – {_format_order_number(order)}")
         self.setModal(False)
 
         self.resize(1400, 750)  # Increased from 1200x700 to accommodate wider columns
@@ -259,25 +271,65 @@ class EpacesHelperDialog(QDialog):
 
         header_layout.addLayout(row3)
 
-        # Row 4: Condensed patient address
-        row_addr = QHBoxLayout()
-        row_addr.setSpacing(10)  # Increased horizontal spacing
+        # Row 4a: Address street
+        row_addr_street = QHBoxLayout()
+        row_addr_street.setSpacing(10)
 
-        self.lbl_address_line = QLabel("")
-        self.lbl_address_line.setTextInteractionFlags(
+        self.lbl_address_street = QLabel("")
+        self.lbl_address_street.setTextInteractionFlags(
             Qt.TextInteractionFlag.TextSelectableByMouse
         )
 
-        row_addr.addWidget(QLabel("Address:"))
-        row_addr.addWidget(self.lbl_address_line, 1)
+        row_addr_street.addWidget(QLabel("Address:"))
+        row_addr_street.addWidget(self.lbl_address_street, 1)
 
-        btn_addr_copy = self._make_copy_button(
-            "Copy full address line",
-            lambda: _copy(self.lbl_address_line.text()),
+        btn_addr_street_copy = self._make_copy_button(
+            "Copy street address",
+            lambda: _copy(self.lbl_address_street.text()),
         )
-        row_addr.addWidget(btn_addr_copy)
+        row_addr_street.addWidget(btn_addr_street_copy)
 
-        header_layout.addLayout(row_addr)
+        header_layout.addLayout(row_addr_street)
+
+        # Row 4b: City/State
+        row_addr_city = QHBoxLayout()
+        row_addr_city.setSpacing(10)
+
+        self.lbl_address_city_state = QLabel("")
+        self.lbl_address_city_state.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse
+        )
+
+        row_addr_city.addWidget(QLabel("City/State:"))
+        row_addr_city.addWidget(self.lbl_address_city_state, 1)
+
+        btn_addr_city_copy = self._make_copy_button(
+            "Copy city/state",
+            lambda: _copy(self.lbl_address_city_state.text()),
+        )
+        row_addr_city.addWidget(btn_addr_city_copy)
+
+        header_layout.addLayout(row_addr_city)
+
+        # Row 4c: ZIP
+        row_addr_zip = QHBoxLayout()
+        row_addr_zip.setSpacing(10)
+
+        self.lbl_address_zip = QLabel("")
+        self.lbl_address_zip.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse
+        )
+
+        row_addr_zip.addWidget(QLabel("ZIP:"))
+        row_addr_zip.addWidget(self.lbl_address_zip, 1)
+
+        btn_addr_zip_copy = self._make_copy_button(
+            "Copy ZIP",
+            lambda: _copy(self.lbl_address_zip.text()),
+        )
+        row_addr_zip.addWidget(btn_addr_zip_copy)
+
+        header_layout.addLayout(row_addr_zip)
 
         # Row 5: ICD-10 list
         icd_row = QHBoxLayout()
@@ -311,9 +363,9 @@ class EpacesHelperDialog(QDialog):
         # ITEM column: increased width for item numbers + Copy button
         header_view.setSectionResizeMode(0, QHeaderView.ResizeMode.Fixed)
         header_view.resizeSection(0, 160)  # Increased from 120
-        # HCPCS column: increased width for codes + Copy button
+        # HCPCS column: wider to accommodate multi-HCPCS codes with + sign (e.g., E0244+E0243)
         header_view.setSectionResizeMode(1, QHeaderView.ResizeMode.Fixed)
-        header_view.resizeSection(1, 140)  # Increased from 100
+        header_view.resizeSection(1, 180)  # Increased from 140 for multi-HCPCS codes
         # QTY: fixed width to accommodate number + Copy button
         header_view.setSectionResizeMode(2, QHeaderView.ResizeMode.Fixed)
         header_view.resizeSection(2, 120)  # Fixed size instead of auto
@@ -322,7 +374,7 @@ class EpacesHelperDialog(QDialog):
         header_view.resizeSection(3, 140)  # Fixed size instead of auto
         # MD DIRECTIONS: increased width for longer text
         header_view.setSectionResizeMode(4, QHeaderView.ResizeMode.Fixed)
-        header_view.resizeSection(4, 320)  # Increased from 280
+        header_view.resizeSection(4, 280)  # Reduced to make room for wider HCPCS column
         # PA #: increased width for 12 characters + Copy button
         header_view.setSectionResizeMode(5, QHeaderView.ResizeMode.Fixed)
         header_view.resizeSection(5, 280)  # Increased from 250
@@ -374,6 +426,19 @@ class EpacesHelperDialog(QDialog):
         self.btn_save_delivery.clicked.connect(self._on_save_delivery_info)
         self.btn_save_delivery.setStyleSheet("background-color: #17a2b8; color: white; font-weight: bold; border-radius: 4px; padding: 6px 12px;")
         bottom.addWidget(self.btn_save_delivery)
+
+        self.btn_print_ticket = QPushButton("🎫 Print Delivery Ticket")
+        self.btn_print_ticket.setToolTip("Print delivery ticket PDF")
+        self.btn_print_ticket.setMinimumHeight(32)
+        self.btn_print_ticket.clicked.connect(self._print_delivery_ticket)
+        self.btn_print_ticket.setStyleSheet("background-color: #6c757d; color: white; font-weight: bold; border-radius: 4px; padding: 6px 12px;")
+        bottom.addWidget(self.btn_print_ticket)
+
+        self.btn_mark_shipped = QPushButton("Mark as Shipped")
+        self.btn_mark_shipped.setMinimumHeight(32)
+        self.btn_mark_shipped.clicked.connect(self._on_mark_shipped)
+        self.btn_mark_shipped.setStyleSheet("background-color: #007bff; color: white; font-weight: bold; border-radius: 4px; padding: 6px 12px;")
+        bottom.addWidget(self.btn_mark_shipped)
 
         self.btn_mark_billed = QPushButton("Mark as Billed")
         self.btn_mark_billed.setProperty("class", "primary")
@@ -456,16 +521,25 @@ class EpacesHelperDialog(QDialog):
             print(f"EPACES: Trying name lookup for last='{o.patient_last_name}', first='{o.patient_first_name}'")
             try:
                 from dmelogic.db.patients import find_patient_by_name_and_dob
-                dob_str = None
+                # Try DOB in MM/DD/YYYY format first (patient DB format), then ISO, then without DOB
+                dob_formats = []
                 if getattr(o, 'patient_dob', None):
-                    dob_str = o.patient_dob.strftime("%Y-%m-%d")
-                print(f"EPACES: DOB string = '{dob_str}'")
-                patient_record = find_patient_by_name_and_dob(
-                    o.patient_last_name,
-                    o.patient_first_name,
-                    dob=dob_str,
-                    folder_path=self.folder_path
-                )
+                    dob_formats = [
+                        o.patient_dob.strftime("%m/%d/%Y"),  # Patient DB format
+                        o.patient_dob.strftime("%Y-%m-%d"),  # ISO format
+                    ]
+                dob_formats.append(None)  # Fallback: no DOB filter
+                
+                for dob_str in dob_formats:
+                    print(f"EPACES: Trying DOB = '{dob_str}'")
+                    patient_record = find_patient_by_name_and_dob(
+                        o.patient_last_name,
+                        o.patient_first_name,
+                        dob=dob_str,
+                        folder_path=self.folder_path
+                    )
+                    if patient_record:
+                        break
                 if patient_record:
                     print(f"EPACES: FOUND patient! address='{patient_record['address']}'")
                 else:
@@ -503,21 +577,26 @@ class EpacesHelperDialog(QDialog):
         # Fallback to patient record for insurance if order lacks it
         if patient_record:
             try:
-                def get_field(row, field_name):
-                    """Safely get a field from a sqlite Row."""
-                    if hasattr(row, "keys") and field_name in row.keys():
-                        return row[field_name] or ""
+                def get_field(row, *field_names):
+                    """Safely get a field from a sqlite Row using multiple possible field names."""
+                    if hasattr(row, "keys"):
+                        row_keys = row.keys()
+                        for k in field_names:
+                            if k in row_keys:
+                                val = row[k]
+                                if val:
+                                    return str(val).strip()
                     return ""
                 
                 # Patients table uses: primary_insurance, policy_number, secondary_insurance, secondary_insurance_id
                 if not primary_name:
                     primary_name = get_field(patient_record, "primary_insurance")
                 if not primary_id:
-                    primary_id = get_field(patient_record, "policy_number")
+                    primary_id = get_field(patient_record, "policy_number", "primary_insurance_id")
                 if not secondary_name:
                     secondary_name = get_field(patient_record, "secondary_insurance")
                 if not secondary_id:
-                    secondary_id = get_field(patient_record, "secondary_insurance_id")
+                    secondary_id = get_field(patient_record, "secondary_insurance_id", "secondary_policy", "secondary_policy_number")
                 print(f"EPACES: Insurance after patient fallback - pri: {primary_name}/{primary_id}, sec: {secondary_name}/{secondary_id}")
             except Exception as e:
                 print(f"EPACES: Failed to get insurance from patient: {e}")
@@ -534,6 +613,8 @@ class EpacesHelperDialog(QDialog):
             prim_line = primary_name
             if primary_id:
                 prim_line += f" (ID: {primary_id})"
+        elif primary_id:
+            prim_line = f"ID: {primary_id}"
         self.lbl_primary_ins.setText(prim_line)
         self.lbl_primary_member.setText(primary_id or "")
 
@@ -546,6 +627,8 @@ class EpacesHelperDialog(QDialog):
             sec_line = secondary_name
             if secondary_id:
                 sec_line += f" (ID: {secondary_id})"
+        elif secondary_id:
+            sec_line = f"ID: {secondary_id}"
         self.lbl_secondary_ins.setText(sec_line)
 
         # --- Delivery Date and Tracking Number -----------------------
@@ -589,40 +672,76 @@ class EpacesHelperDialog(QDialog):
             getattr(o, "patient_first_name", None),
         )
 
-        def _build_snapshot_address() -> str:
-            street = (
+        def _address_parts() -> tuple[str, str, str, str]:
+            """Return (street, city, state, zip_code) with best-available data."""
+
+            def _field(row, key) -> str:
+                try:
+                    if hasattr(row, "keys") and key in row.keys():
+                        return (row[key] or "").strip()
+                except Exception:
+                    return ""
+                return ""
+
+            # Prefer patient record fields if present
+            street = _field(patient_record, "address") if patient_record else ""
+            city = _field(patient_record, "city") if patient_record else ""
+            state = _field(patient_record, "state") if patient_record else ""
+            # Try both zip_code and zip column names
+            zip_code = (_field(patient_record, "zip_code") or _field(patient_record, "zip")) if patient_record else ""
+
+            # Fall back to order snapshot values if missing
+            street = street or (
                 getattr(o, "patient_address_at_order_time", None)
                 or getattr(o, "patient_address", None)
                 or ""
             ).strip()
-            city = (
+            city = city or (
                 getattr(o, "patient_city_at_order_time", None)
                 or getattr(o, "patient_city", None)
                 or ""
             ).strip()
-            state = (
+            state = state or (
                 getattr(o, "patient_state_at_order_time", None)
                 or getattr(o, "patient_state", None)
                 or ""
             ).strip()
-            zip_code = (
+            zip_code = zip_code or (
                 getattr(o, "patient_zip_at_order_time", None)
                 or getattr(o, "patient_zip", None)
                 or ""
             ).strip()
 
-            if not any([street, city, state, zip_code]):
-                return ""
+            return street, city, state, zip_code
 
-            city_state = ", ".join([p for p in [city, state] if p])
-            tail = (f"{city_state} {zip_code}".strip()).strip()
-            parts = [p for p in [street, tail] if p]
-            return ", ".join([p for p in parts if p])
+        street_line, city_line, state_line, zip_line = _address_parts()
 
-        snapshot_address = _build_snapshot_address()
-        address_line = resolved_address or snapshot_address or "N/A"
-        print(f"EPACES: Final address_line = {address_line}")
-        self.lbl_address_line.setText(address_line)
+        # If get_patient_full_address returned a single string, use it only to fill blanks
+        if resolved_address:
+            parts = [p.strip() for p in resolved_address.split(",") if p.strip()]
+            if not street_line and parts:
+                street_line = parts[0]
+            if (not city_line or not state_line) and len(parts) > 1:
+                # Assume next segment contains city/state
+                remainder = ",".join(parts[1:]).strip()
+                # naive parse city state zip
+                tokens = remainder.replace("  ", " ").split()
+                if tokens:
+                    if not city_line:
+                        city_line = tokens[0].rstrip(",")
+                    if len(tokens) > 1 and not state_line:
+                        state_line = tokens[1].rstrip(",")
+                    if len(tokens) > 2 and not zip_line:
+                        zip_line = tokens[2]
+
+        if not street_line and not city_line and not state_line and not zip_line:
+            street_line = "N/A"
+
+        print(f"EPACES: Address split -> street='{street_line}', city='{city_line}', state='{state_line}', zip='{zip_line}'")
+        city_state_line = ", ".join([p for p in [city_line, state_line] if p])
+        self.lbl_address_street.setText(street_line)
+        self.lbl_address_city_state.setText(city_state_line)
+        self.lbl_address_zip.setText(zip_line)
 
         # ICD-10s
         if getattr(o, "icd_codes", None):
@@ -730,31 +849,39 @@ class EpacesHelperDialog(QDialog):
         claim_total = Decimal("0.00")
 
         for item in items:
+            # Get full HCPCS code from order (e.g., "T4521-FRBRFSMAL" or "E0244+E0243-ITEMNUM")
             full_hcpcs = (item.hcpcs_code or "").strip()
-            # Actual HCPCS (pre-hyphen) and item code (post-hyphen)
-            post_hyphen = ""
-            if "-" in full_hcpcs:
-                pre, post = full_hcpcs.split("-", 1)
-                actual_hcpcs = pre.strip()
-                post_hyphen = post.strip()
-            else:
-                actual_hcpcs = full_hcpcs
             
-            # Use inventory item number for ITEM column (e.g., MSC281226C)
-            # First try from order item, then lookup from inventory by HCPCS
-            item_number = (getattr(item, "item_number", None) or "").strip()
-            if not item_number:
-                # Lookup item_number from inventory database by HCPCS code
+            # HCPCS display - show full code if multi-code (contains +), otherwise base code only
+            if "+" in full_hcpcs:
+                # Multi-HCPCS code (e.g., E0244+E0243) - show full code without item suffix
+                display_hcpcs = full_hcpcs.split("-")[0] if "-" in full_hcpcs else full_hcpcs
+            else:
+                # Single HCPCS - extract base code (first 5 characters)
+                display_hcpcs = full_hcpcs[:5] if len(full_hcpcs) >= 5 else full_hcpcs
+            base_hcpcs = display_hcpcs
+            
+            # Get item number from order and look up proper formatting in inventory
+            item_number = ""
+            
+            # First try the item_number field from order
+            if hasattr(item, "item_number") and item.item_number:
+                item_number = item.item_number.strip()
+            
+            # If not in order, extract from HCPCS code (part after hyphen)
+            if not item_number and "-" in full_hcpcs:
+                item_number_raw = full_hcpcs.split("-", 1)[1].strip()
+                # Look up in inventory to get properly formatted version
                 try:
                     from dmelogic.db.inventory import fetch_latest_item_by_hcpcs
-                    inv_data = fetch_latest_item_by_hcpcs(actual_hcpcs, folder_path=self.folder_path)
+                    inv_data = fetch_latest_item_by_hcpcs(full_hcpcs, folder_path=self.folder_path)
                     if inv_data and inv_data.get("item_number"):
                         item_number = inv_data["item_number"]
+                    else:
+                        # Fallback to raw extracted value
+                        item_number = item_number_raw
                 except Exception:
-                    pass
-            # Final fallback to post-hyphen if still empty
-            if not item_number and post_hyphen:
-                item_number = post_hyphen
+                    item_number = item_number_raw
 
             qty = str(item.quantity or 0)
 
@@ -781,21 +908,20 @@ class EpacesHelperDialog(QDialog):
             self.items_table.insertRow(row)
             self.items_table.setRowHeight(row, 42)  # Increased to accommodate widgets fully
 
-            # ITEM cell (inventory item number, e.g., MSC281226C)
+            # ITEM cell (inventory item number, e.g., "FITEXTRASM")
             item_cell = self._make_value_cell(
                 display=item_number,
-                tooltip="Copy inventory item number",
+                tooltip="Copy item number",
                 copy_value=item_number,
             )
             self.items_table.setCellWidget(row, 0, item_cell)
 
-            # HCPCS cell (Actual HCPCS, tooltip full string)
+            # HCPCS cell (shows full multi-HCPCS with + sign, or base code for single HCPCS)
             hcpcs_cell = self._make_value_cell(
-                display=actual_hcpcs,
-                tooltip="Copy HCPCS (pre-hyphen)",
-                copy_value=actual_hcpcs,
+                display=display_hcpcs,
+                tooltip="Copy HCPCS code",
+                copy_value=display_hcpcs,
             )
-            hcpcs_cell.setToolTip(full_hcpcs or "")
             self.items_table.setCellWidget(row, 1, hcpcs_cell)
 
             # QTY cell
@@ -913,6 +1039,7 @@ class EpacesHelperDialog(QDialog):
                 "Saved",
                 "Delivery date and tracking number saved successfully.",
             )
+            self._refresh_parent_orders()
         except Exception as e:
             QMessageBox.warning(
                 self,
@@ -957,6 +1084,47 @@ class EpacesHelperDialog(QDialog):
             "Mark as Billed",
             "Order has been marked as BILLED.",
         )
+        self._refresh_parent_orders()
+
+    def _on_mark_shipped(self) -> None:
+        """Mark this order as SHIPPED and save delivery/tracking first."""
+        from PyQt6.QtWidgets import QMessageBox
+        from PyQt6.QtCore import QDate
+
+        # Auto-set delivery date to today if not already set
+        current_date = self.delivery_date_edit.date()
+        if not current_date.isValid() or current_date.year() <= 2000:
+            self.delivery_date_edit.setDate(QDate.currentDate())
+
+        self._on_save_delivery_info()
+        self._save_pa_numbers()
+
+        folder = self.folder_path
+        current = self.order.order_status.value
+        new_status = OrderStatus.SHIPPED.value
+
+        success, error = update_order_status_validated(
+            order_id=self.order.id,
+            current_status=current,
+            new_status=new_status,
+            folder_path=folder,
+        )
+
+        if not success:
+            QMessageBox.warning(
+                self,
+                "Mark as Shipped",
+                error or "Failed to mark order as SHIPPED.",
+            )
+            return
+
+        self.order.order_status = OrderStatus.SHIPPED
+        QMessageBox.information(
+            self,
+            "Mark as Shipped",
+            "Order has been marked as SHIPPED.",
+        )
+        self._refresh_parent_orders()
 
     def _save_pa_numbers(self) -> bool:
         """
@@ -1002,4 +1170,336 @@ class EpacesHelperDialog(QDialog):
     def _save_pa_and_close(self) -> None:
         """Save PA numbers and close the dialog."""
         self._save_pa_numbers()
+        self._refresh_parent_orders()
         self.accept()
+
+    def _print_delivery_ticket(self) -> None:
+        """Print delivery ticket using ReportLab."""
+        try:
+            from reportlab.lib.pagesizes import letter
+            from reportlab.lib import colors
+            from reportlab.lib.units import inch
+            from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
+            from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+        except ImportError:
+            QMessageBox.critical(
+                self,
+                "Print Delivery Ticket",
+                "ReportLab is not available. Please install it:\n\npip install reportlab"
+            )
+            return
+
+        import os
+        import traceback
+        from datetime import datetime
+        from pathlib import Path
+
+        order = self.order
+
+        try:
+            # File path - save to Downloads folder
+            try:
+                downloads = str(Path.home() / "Downloads")
+                folder_path = downloads if os.path.exists(downloads) else str(Path.home())
+            except Exception:
+                folder_path = os.getcwd()
+            
+            ts = datetime.now().strftime('%Y%m%d_%H%M%S')
+            order_num = f"ORD-{order.id}"
+            out_name = f"DeliveryTicket_{order_num}_{ts}.pdf"
+            file_path = os.path.join(folder_path, out_name)
+
+            # Setup PDF styles
+            styles = getSampleStyleSheet()
+            heading_style = ParagraphStyle(
+                'ItemHeading',
+                parent=styles['Heading3'],
+                fontSize=11,
+                textColor=colors.HexColor('#2c3e50'),
+                spaceAfter=6,
+            )
+
+            # Format patient name
+            patient_name = order.patient_full_name or "N/A"
+            
+            # Format dates
+            def format_date(val):
+                if not val:
+                    return ""
+                if isinstance(val, str):
+                    try:
+                        from datetime import datetime as dt
+                        parsed = dt.strptime(val, "%Y-%m-%d")
+                        return parsed.strftime("%m/%d/%Y")
+                    except Exception:
+                        return val
+                else:
+                    return val.strftime("%m/%d/%Y") if hasattr(val, "strftime") else str(val)
+            
+            rx_date = format_date(order.rx_date)
+            order_date = format_date(order.order_date)
+            patient_dob = format_date(order.patient_dob)
+            patient_phone = order.patient_phone or ""
+            patient_address = order.patient_address or ""
+            prescriber_name = order.prescriber_name_at_order_time or ""
+            prescriber_npi = order.prescriber_npi_at_order_time or ""
+            doctor_directions = order.doctor_directions or ""
+            special_instructions = order.special_instructions or ""
+
+            # Build story
+            story = []
+            story.append(Paragraph("DELIVERY TICKET", styles['Title']))
+            story.append(Spacer(1, 0.1 * inch))
+            story.append(Paragraph(f"<b>Order #:</b> {order_num}", styles['Heading3']))
+            story.append(Spacer(1, 0.15 * inch))
+
+            # Patient/Prescriber block
+            pt_tbl_data = [
+                [
+                    Paragraph("<b>Patient</b>", heading_style),
+                    '',
+                    Paragraph("<b>Prescriber</b>", heading_style)
+                ],
+                [
+                    Paragraph(f"<b>Name:</b> {patient_name}", styles['Normal']),
+                    Paragraph(
+                        f"<b>DOB:</b> {patient_dob}<br/>"
+                        f"<b>Phone:</b> {patient_phone}<br/>"
+                        f"<b>Address:</b> {patient_address}",
+                        styles['Normal']
+                    ),
+                    Paragraph(f"<b>Name:</b> {prescriber_name}", styles['Normal']),
+                ],
+                [
+                    '',
+                    '',
+                    Paragraph(f"<b>NPI:</b> {prescriber_npi}", styles['Normal'])
+                ],
+            ]
+            pt_tbl = Table(pt_tbl_data, colWidths=[1.5*inch, 3.5*inch, 3.0*inch])
+            pt_tbl.setStyle(TableStyle([
+                ('VALIGN', (0,0), (-1,-1), 'TOP'),
+                ('BOTTOMPADDING', (0,0), (-1,-1), 6),
+            ]))
+            story.append(pt_tbl)
+            story.append(Spacer(1, 0.15 * inch))
+
+            # Order metadata
+            md_table = Table([
+                [
+                    Paragraph('<b>RX Date</b>', styles['Normal']),
+                    rx_date or 'N/A',
+                    Paragraph('<b>Order Date</b>', styles['Normal']),
+                    order_date or 'N/A'
+                ],
+            ], colWidths=[1.2*inch, 2.5*inch, 1.5*inch, 2.8*inch])
+            md_table.setStyle(TableStyle([
+                ('GRID', (0,0), (-1,-1), 0.25, colors.lightgrey),
+                ('BACKGROUND', (0,0), (-1,0), colors.whitesmoke),
+                ('VALIGN', (0,0), (-1,-1), 'TOP'),
+            ]))
+            story.append(md_table)
+            story.append(Spacer(1, 0.2 * inch))
+
+            # Items table
+            story.append(Paragraph("ITEMS", heading_style))
+            item_rows = [['HCPCS', 'Description', 'Qty', 'Days']]
+            
+            for item in order.items:
+                full_hcpcs = (item.hcpcs_code or "").strip()
+                # Display full HCPCS code if multi-code (contains +), otherwise base code only
+                if "+" in full_hcpcs:
+                    # Multi-HCPCS code (e.g., E0244+E0243) - show full code without item suffix
+                    display_hcpcs = full_hcpcs.split("-")[0].strip() if "-" in full_hcpcs else full_hcpcs
+                else:
+                    # Single HCPCS - extract base code (first 5 characters)
+                    display_hcpcs = full_hcpcs[:5] if len(full_hcpcs) >= 5 else full_hcpcs
+                desc = item.description or ""
+                qty = str(item.quantity or 0)
+                days = str(item.days_supply or 0)
+                item_rows.append([display_hcpcs, desc, qty, days])
+            
+            t = Table(item_rows, colWidths=[1.2*inch, 4.5*inch, 0.7*inch, 0.8*inch])
+            t.setStyle(TableStyle([
+                ('GRID', (0,0), (-1,-1), 0.5, colors.grey),
+                ('BACKGROUND', (0,0), (-1,0), colors.HexColor('#2c3e50')),
+                ('TEXTCOLOR', (0,0), (-1,0), colors.white),
+                ('FONTNAME', (0,0), (-1,0), 'Helvetica-Bold'),
+                ('FONTSIZE', (0,0), (-1,0), 10),
+                ('ALIGN', (2,0), (3,-1), 'CENTER'),
+                ('VALIGN', (0,0), (-1,-1), 'MIDDLE'),
+                ('FONTNAME', (0,1), (-1,-1), 'Helvetica'),
+                ('FONTSIZE', (0,1), (-1,-1), 9),
+                ('ROWBACKGROUNDS', (0,1), (-1,-1), [colors.white, colors.HexColor('#f8f9fa')]),
+            ]))
+            story.append(t)
+            story.append(Spacer(1, 0.2 * inch))
+
+            # Doctor's Directions
+            if doctor_directions:
+                story.append(Paragraph("DOCTOR'S DIRECTIONS", heading_style))
+                story.append(Spacer(1, 0.1 * inch))
+                directions_text = Paragraph(
+                    doctor_directions.replace('\n', '<br/>'),
+                    ParagraphStyle(
+                        'Directions',
+                        parent=styles['Normal'],
+                        fontSize=10,
+                        leading=14,
+                        leftIndent=10,
+                        rightIndent=10,
+                        spaceAfter=10,
+                        textColor=colors.HexColor('#2c3e50'),
+                        backColor=colors.HexColor('#fffef0'),
+                        borderPadding=8,
+                        borderWidth=2,
+                        borderColor=colors.HexColor('#f0ad4e')
+                    )
+                )
+                story.append(directions_text)
+                story.append(Spacer(1, 0.2 * inch))
+
+            # Signature section
+            story.append(Spacer(1, 0.4 * inch))
+            sig_style = ParagraphStyle(
+                'Signature',
+                parent=styles['Normal'],
+                fontSize=10,
+                leading=14
+            )
+            
+            name_table = Table(
+                [[
+                    Paragraph("Print Name:", sig_style),
+                    '',
+                    Paragraph("Relationship:", sig_style),
+                    ''
+                ]],
+                colWidths=[1.2*inch, 3.0*inch, 1.3*inch, 2.2*inch],
+                rowHeights=[0.4*inch]
+            )
+            name_table.setStyle(TableStyle([
+                ('LINEBELOW', (1,0), (1,0), 1, colors.black),
+                ('LINEBELOW', (3,0), (3,0), 1, colors.black),
+                ('VALIGN', (0,0), (-1,-1), 'BOTTOM'),
+            ]))
+            story.append(name_table)
+
+            story.append(Spacer(1, 0.15 * inch))
+            sig_table = Table(
+                [[
+                    Paragraph("Signature:", sig_style),
+                    '',
+                    Paragraph("Date:", sig_style),
+                    ''
+                ]],
+                colWidths=[1.2*inch, 4.6*inch, 0.8*inch, 1.2*inch],
+                rowHeights=[0.4*inch]
+            )
+            sig_table.setStyle(TableStyle([
+                ('LINEBELOW', (1,0), (1,0), 1, colors.black),
+                ('LINEBELOW', (3,0), (3,0), 1, colors.black),
+                ('VALIGN', (0,0), (-1,-1), 'BOTTOM'),
+            ]))
+            story.append(sig_table)
+
+            story.append(Spacer(1, 0.15 * inch))
+            story.append(
+                Paragraph(
+                    "I acknowledge receipt of the items listed above in good condition.",
+                    ParagraphStyle(
+                        'Acknowledgment',
+                        parent=styles['Normal'],
+                        fontSize=9,
+                        textColor=colors.grey,
+                        alignment=1
+                    )
+                )
+            )
+
+            # Note for Delivery
+            if special_instructions:
+                story.append(Spacer(1, 0.3 * inch))
+                story.append(Paragraph("📋 NOTE FOR DELIVERY", heading_style))
+                story.append(Spacer(1, 0.1 * inch))
+                special_text = Paragraph(
+                    special_instructions.replace('\n', '<br/>'),
+                    ParagraphStyle(
+                        'DeliveryNote',
+                        parent=styles['Normal'],
+                        fontSize=11,
+                        leading=15,
+                        leftIndent=10,
+                        rightIndent=10,
+                        spaceAfter=10,
+                        textColor=colors.HexColor('#2c3e50'),
+                        backColor=colors.HexColor('#e8f4fd'),
+                        borderPadding=10,
+                        borderWidth=2,
+                        borderColor=colors.HexColor('#5bc0de')
+                    )
+                )
+                story.append(special_text)
+
+            # Build PDF
+            doc = SimpleDocTemplate(
+                file_path,
+                pagesize=letter,
+                leftMargin=0.5*inch,
+                rightMargin=0.5*inch,
+                topMargin=0.5*inch,
+                bottomMargin=0.5*inch
+            )
+            doc.build(story)
+
+            # Open PDF
+            try:
+                os.startfile(file_path)
+            except Exception:
+                pass
+            
+            QMessageBox.information(
+                self,
+                "Delivery Ticket",
+                f"Delivery ticket saved:\n\n{file_path}"
+            )
+
+        except Exception as e:
+            QMessageBox.critical(
+                self,
+                "Print Error",
+                f"Failed to print delivery ticket:\n\n{str(e)}\n\n{traceback.format_exc()}"
+            )
+
+    def _refresh_parent_orders(self) -> None:
+        """Refresh parent order list/grid when available."""
+        try:
+            parent = self.parent()
+            if parent and hasattr(parent, "load_orders"):
+                parent.load_orders()
+        except Exception as e:
+            print(f"EPACES: Failed to refresh parent orders: {e}")
+
+    def refresh_order(self, new_order) -> None:
+        """
+        Refresh the helper with a new/updated order.
+        Called when order items change or when viewing a different order.
+        """
+        self.order = new_order
+        self.setWindowTitle(f"EPACES – {_format_order_number(new_order)}")
+        
+        # Clear existing ICD codes
+        while self.icd_codes_layout.count():
+            child = self.icd_codes_layout.takeAt(0)
+            if child.widget():
+                child.widget().deleteLater()
+        
+        # Clear PA edits tracking
+        self._pa_edits.clear()
+        
+        # Re-bind all data
+        self._bind_data()
+        
+        # Bring to front
+        self.raise_()
+        self.activateWindow()

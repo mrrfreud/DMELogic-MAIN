@@ -18,7 +18,7 @@ from typing import Optional, Tuple, List
 
 from dmelogic.db import orders as orders_repo
 from dmelogic.db.base import UnitOfWork
-from dmelogic.db.models import Order, OrderItemInput, OrderInput
+from dmelogic.db.models import Order, OrderItemInput, OrderInput, OrderStatus
 from dmelogic.config import debug_log
 
 
@@ -153,6 +153,8 @@ def process_refill(
             notes = (notes + "\n\n" if notes else "") + extra
 
         # 5) Build OrderInput for new order
+        new_status = OrderStatus.UNBILLED.value
+
         order_input = OrderInput(
             patient_last_name=src.patient_last_name or "",
             patient_first_name=src.patient_first_name or "",
@@ -168,7 +170,7 @@ def process_refill(
             primary_insurance_id=src.primary_insurance_id,
             rx_date=str(src.rx_date) if src.rx_date else None,
             order_date=str(date.today()),
-            order_status=src.order_status.value if hasattr(src.order_status, 'value') else str(src.order_status),
+            order_status=new_status,
             billing_type=src.billing_type.value if hasattr(src.billing_type, 'value') else str(src.billing_type),
             icd_codes=list(src.icd_codes),
             notes=notes,

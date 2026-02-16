@@ -6,9 +6,11 @@ import sys
 import os
 from pathlib import Path
 
+from dmelogic.version import APP_VERSION as DM_APP_VERSION
+
 # Build configuration
 APP_NAME = "DME Logic"
-APP_VERSION = "2.0.0"
+APP_VERSION = DM_APP_VERSION
 APP_AUTHOR = "DME Logic"
 APP_DESCRIPTION = "DME Order Management System"
 

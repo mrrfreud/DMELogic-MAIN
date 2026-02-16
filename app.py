@@ -10,6 +10,8 @@ from datetime import datetime
 from pathlib import Path
 
 from PyQt6.QtWidgets import QApplication, QMessageBox
+from PyQt6.QtCore import Qt
+from PyQt6.QtGui import QGuiApplication
 
 from dmelogic.ocr_status import ensure_ocr_configured
 from dmelogic.ui import create_main_window
@@ -102,11 +104,18 @@ def main():
     except Exception:
         pass
     
+    # Enable High DPI scaling for sharp fonts and modern appearance
+    # Note: Qt6 has High DPI enabled by default, just set the rounding policy
+    QApplication.setHighDpiScaleFactorRoundingPolicy(
+        Qt.HighDpiScaleFactorRoundingPolicy.PassThrough
+    )
+    
     logging.info("Creating QApplication...")
     app = QApplication(sys.argv)
     
-    # Apply theme (default to light theme)
-    apply_theme(app, "light")
+    # Theme note:
+    # The installed app UI look relies primarily on widget-level styling.
+    # Do not force-apply a global QSS theme here; it can override that look.
 
     # Initialize user authentication database
     logging.info("Initializing authentication system...")

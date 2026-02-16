@@ -24,6 +24,7 @@ except Exception as e:
         def stop(self):
             pass
 from ocr_tools import extract_text_from_pdf
+from dmelogic.utils.hcpcs_mapper import get_hcpcs_mapper
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
                              QListWidget, QLabel, QLineEdit, QTextEdit, QPushButton,
                              QSplitter, QScrollArea, QFileDialog, QMenuBar, QMessageBox,
@@ -1302,14 +1303,13 @@ class QuickDeliveryTicketDialog(QDialog):
 
     def _default_ticket_dir(self) -> str:
         try:
-            base = None
-            if isinstance(self.parent.settings, dict):
-                base = self.parent.settings.get('db_folder')
-            if not base:
-                base = os.path.dirname(os.path.abspath(__file__))
-            out_dir = os.path.join(base, 'Tickets')
-            os.makedirs(out_dir, exist_ok=True)
-            return out_dir
+            # Use Downloads folder
+            from pathlib import Path
+            downloads = str(Path.home() / "Downloads")
+            if os.path.exists(downloads):
+                return downloads
+            # Fallback to user home if Downloads doesn't exist
+            return str(Path.home())
         except Exception:
             return os.getcwd()
 
@@ -3259,9 +3259,11 @@ class NewOrderDialog(QDialog):
                 heading_style = ParagraphStyle('Heading', parent=styles['Heading2'], spaceAfter=6, textColor=colors.HexColor('#2c3e50'))
                 subtle = ParagraphStyle('Subtle', parent=styles['Normal'], fontSize=9, textColor=colors.grey)
 
-                # File name
+                # File name - save to Downloads folder
                 try:
-                    base_folder = getattr(self.parent, 'folder_path', os.getcwd())
+                    from pathlib import Path
+                    downloads = str(Path.home() / "Downloads")
+                    base_folder = downloads if os.path.exists(downloads) else os.getcwd()
                 except Exception:
                     base_folder = os.getcwd()
                 ts = datetime.now().strftime('%Y%m%d_%H%M%S')
@@ -5525,13 +5527,17 @@ class InventoryItemDialog(QDialog):
         self.description.setPlaceholderText("Item description")
         self.category = QComboBox()
         self.category.setEditable(True)
-        # Populate categories dynamically from DB (fallback: leave empty if load fails)
+        # Populate categories dynamically from DB (fallback: load directly if parent doesn't have method)
         try:
             p = self.parent()
             if p and hasattr(p, 'load_category_names'):
                 p.load_category_names(self.category)
+            else:
+                # Fallback: load categories directly from database
+                self._load_categories_from_db()
         except Exception:
-            pass
+            # Last resort fallback
+            self._load_categories_from_db()
         
         basic_layout.addWidget(QLabel("Item #:"), 0, 0)
         basic_layout.addWidget(self.item_number, 0, 1)
@@ -5586,8 +5592,12 @@ class InventoryItemDialog(QDialog):
             p = self.parent()
             if p and hasattr(p, 'load_supplier_names'):
                 p.load_supplier_names(self.supplier_combo)
+            else:
+                # Fallback: load suppliers directly from database
+                self._load_suppliers_from_db()
         except Exception:
-            pass
+            # Last resort fallback
+            self._load_suppliers_from_db()
         self.add_supplier_btn = QPushButton("➕ New Supplier")
         try:
             self.add_supplier_btn.clicked.connect(self.add_new_supplier)
@@ -5800,8 +5810,84 @@ class InventoryItemDialog(QDialog):
                             self.category.setCurrentIndex(idx)
                         else:
                             self.category.setEditText(current_text)
+                else:
+                    # Fallback: reload from DB
+                    current_text = self.category.currentText().strip()
+                    self._load_categories_from_db()
+                    if current_text:
+                        idx = self.category.findText(current_text)
+                        if idx >= 0:
+                            self.category.setCurrentIndex(idx)
+                        else:
+                            self.category.setEditText(current_text)
+            else:
+                QMessageBox.information(self, "Categories", "Category management is not available from this context. You can type a new category name directly.")
         except Exception as e:
             print(f"Category manage error: {e}")
+
+    def _load_categories_from_db(self):
+        """Load categories directly from the inventory database."""
+        try:
+            import os
+            import sqlite3
+            db_file = os.path.join(
+                os.path.expandvars(r"%PROGRAMDATA%"),
+                "DMELogic",
+                "Data",
+                "inventory.db"
+            )
+            if not os.path.exists(db_file):
+                return
+            
+            conn = sqlite3.connect(db_file)
+            cursor = conn.cursor()
+            
+            # Try to get from categories table first
+            try:
+                cursor.execute("SELECT DISTINCT name FROM categories ORDER BY name")
+                categories = [row[0] for row in cursor.fetchall() if row[0]]
+            except Exception:
+                # Fallback to extracting from inventory table
+                cursor.execute("SELECT DISTINCT category FROM inventory WHERE category IS NOT NULL AND category != '' ORDER BY category")
+                categories = [row[0] for row in cursor.fetchall() if row[0]]
+            
+            conn.close()
+            
+            self.category.clear()
+            self.category.addItem("")  # Allow blank
+            for cat in categories:
+                self.category.addItem(cat)
+                
+        except Exception as e:
+            print(f"Failed to load categories from DB: {e}")
+
+    def _load_suppliers_from_db(self):
+        """Load suppliers directly from the suppliers database."""
+        try:
+            import os
+            import sqlite3
+            db_file = os.path.join(
+                os.path.expandvars(r"%PROGRAMDATA%"),
+                "DMELogic",
+                "Data",
+                "suppliers.db"
+            )
+            if not os.path.exists(db_file):
+                return
+            
+            conn = sqlite3.connect(db_file)
+            cursor = conn.cursor()
+            cursor.execute("SELECT name FROM suppliers ORDER BY name")
+            suppliers = [row[0] for row in cursor.fetchall() if row[0]]
+            conn.close()
+            
+            self.supplier_combo.clear()
+            self.supplier_combo.addItem("")  # Allow blank
+            for sup in suppliers:
+                self.supplier_combo.addItem(sup)
+                
+        except Exception as e:
+            print(f"Failed to load suppliers from DB: {e}")
 
 
 class InventoryReportsDialog(QDialog):
@@ -7309,7 +7395,8 @@ class PDFViewer(QMainWindow):
             }
         """)
         
-        # Create individual tabs (ensure Patients tab appears first per requirement)
+        # Create individual tabs (Dashboard first as home screen)
+        self.create_dashboard_tab()
         self.create_patient_management_tab()
         self.create_document_viewer_tab()
         self.create_prescriber_tab()
@@ -8375,6 +8462,589 @@ class PDFViewer(QMainWindow):
 
         # Update page navigation state
         self.update_page_navigation()
+
+    def create_dashboard_tab(self):
+        """Create the Dashboard/Home Screen tab with overview widgets."""
+        dashboard_tab = QWidget()
+        layout = QVBoxLayout(dashboard_tab)
+        layout.setContentsMargins(20, 20, 20, 20)
+        layout.setSpacing(20)
+
+        # === Header ===
+        header_layout = QHBoxLayout()
+        header = QLabel("🏠 Dashboard")
+        header.setStyleSheet("font-size: 24px; font-weight: bold; color: #ffffff; padding: 10px 0;")
+        header_layout.addWidget(header)
+        header_layout.addStretch()
+        
+        # Refresh button
+        refresh_btn = QPushButton("🔄 Refresh")
+        refresh_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #0078D4;
+                color: white;
+                padding: 8px 16px;
+                border-radius: 4px;
+                font-weight: bold;
+            }
+            QPushButton:hover { background-color: #1084D8; }
+        """)
+        refresh_btn.clicked.connect(self.refresh_dashboard)
+        header_layout.addWidget(refresh_btn)
+        layout.addLayout(header_layout)
+
+        # === Quick Stats Row ===
+        stats_layout = QHBoxLayout()
+        stats_layout.setSpacing(15)
+
+        # Stat card style
+        card_style = """
+            QFrame {
+                background-color: #3C3C3C;
+                border-radius: 10px;
+                padding: 15px;
+            }
+            QLabel { color: white; }
+        """
+
+        # Orders Needing Attention card
+        self.dash_orders_card = QFrame()
+        self.dash_orders_card.setStyleSheet(card_style)
+        self.dash_orders_card.setFixedHeight(120)
+        orders_card_layout = QVBoxLayout(self.dash_orders_card)
+        self.dash_unbilled_label = QLabel("0")
+        self.dash_unbilled_label.setStyleSheet("font-size: 36px; font-weight: bold; color: #ADFF2F;")
+        self.dash_unbilled_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        orders_card_layout.addWidget(self.dash_unbilled_label)
+        orders_card_title = QLabel("Unbilled / On Hold")
+        orders_card_title.setStyleSheet("font-size: 12px; color: #aaaaaa;")
+        orders_card_title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        orders_card_layout.addWidget(orders_card_title)
+        stats_layout.addWidget(self.dash_orders_card)
+
+        # Refills Due This Week card
+        self.dash_refills_card = QFrame()
+        self.dash_refills_card.setStyleSheet(card_style)
+        self.dash_refills_card.setFixedHeight(120)
+        refills_card_layout = QVBoxLayout(self.dash_refills_card)
+        self.dash_refills_label = QLabel("0")
+        self.dash_refills_label.setStyleSheet("font-size: 36px; font-weight: bold; color: #3498db;")
+        self.dash_refills_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        refills_card_layout.addWidget(self.dash_refills_label)
+        refills_card_title = QLabel("Refills Due This Week")
+        refills_card_title.setStyleSheet("font-size: 12px; color: #aaaaaa;")
+        refills_card_title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        refills_card_layout.addWidget(refills_card_title)
+        stats_layout.addWidget(self.dash_refills_card)
+
+        # Tasks Due Today card
+        self.dash_tasks_card = QFrame()
+        self.dash_tasks_card.setStyleSheet(card_style)
+        self.dash_tasks_card.setFixedHeight(120)
+        tasks_card_layout = QVBoxLayout(self.dash_tasks_card)
+        self.dash_tasks_label = QLabel("0")
+        self.dash_tasks_label.setStyleSheet("font-size: 36px; font-weight: bold; color: #e74c3c;")
+        self.dash_tasks_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        tasks_card_layout.addWidget(self.dash_tasks_label)
+        tasks_card_title = QLabel("Tasks Due Today")
+        tasks_card_title.setStyleSheet("font-size: 12px; color: #aaaaaa;")
+        tasks_card_title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        tasks_card_layout.addWidget(tasks_card_title)
+        stats_layout.addWidget(self.dash_tasks_card)
+
+        # Total Patients card
+        self.dash_patients_card = QFrame()
+        self.dash_patients_card.setStyleSheet(card_style)
+        self.dash_patients_card.setFixedHeight(120)
+        patients_card_layout = QVBoxLayout(self.dash_patients_card)
+        self.dash_patients_label = QLabel("0")
+        self.dash_patients_label.setStyleSheet("font-size: 36px; font-weight: bold; color: #9b59b6;")
+        self.dash_patients_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        patients_card_layout.addWidget(self.dash_patients_label)
+        patients_card_title = QLabel("Total Patients")
+        patients_card_title.setStyleSheet("font-size: 12px; color: #aaaaaa;")
+        patients_card_title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        patients_card_layout.addWidget(patients_card_title)
+        stats_layout.addWidget(self.dash_patients_card)
+
+        # Total Orders This Month card
+        self.dash_orders_month_card = QFrame()
+        self.dash_orders_month_card.setStyleSheet(card_style)
+        self.dash_orders_month_card.setFixedHeight(120)
+        orders_month_layout = QVBoxLayout(self.dash_orders_month_card)
+        self.dash_orders_month_label = QLabel("0")
+        self.dash_orders_month_label.setStyleSheet("font-size: 36px; font-weight: bold; color: #27ae60;")
+        self.dash_orders_month_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        orders_month_layout.addWidget(self.dash_orders_month_label)
+        orders_month_title = QLabel("Orders This Month")
+        orders_month_title.setStyleSheet("font-size: 12px; color: #aaaaaa;")
+        orders_month_title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        orders_month_layout.addWidget(orders_month_title)
+        stats_layout.addWidget(self.dash_orders_month_card)
+
+        layout.addLayout(stats_layout)
+
+        # === Main Content Row (2 columns) ===
+        content_layout = QHBoxLayout()
+        content_layout.setSpacing(20)
+
+        # Left Column: Tasks Due Today & Recent Orders
+        left_col = QVBoxLayout()
+        left_col.setSpacing(15)
+
+        # Tasks Due Today section
+        tasks_group = QGroupBox("📋 Tasks Due Today")
+        tasks_group.setStyleSheet("""
+            QGroupBox {
+                font-size: 14px;
+                font-weight: bold;
+                color: #ffffff;
+                border: 1px solid #555;
+                border-radius: 8px;
+                margin-top: 10px;
+                padding-top: 10px;
+            }
+            QGroupBox::title {
+                subcontrol-origin: margin;
+                left: 10px;
+                padding: 0 5px;
+            }
+        """)
+        tasks_group_layout = QVBoxLayout(tasks_group)
+        
+        self.dash_tasks_table = QTableWidget(0, 4)
+        self.dash_tasks_table.setHorizontalHeaderLabels(["Priority", "Title", "Patient", "Status"])
+        self.dash_tasks_table.horizontalHeader().setStretchLastSection(True)
+        self.dash_tasks_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        self.dash_tasks_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        self.dash_tasks_table.setMaximumHeight(200)
+        self.dash_tasks_table.setStyleSheet("QTableWidget { background-color: #2B2B2B; color: white; }")
+        self.dash_tasks_table.itemDoubleClicked.connect(self._dash_go_to_task)
+        tasks_group_layout.addWidget(self.dash_tasks_table)
+        
+        left_col.addWidget(tasks_group)
+
+        # Recent Orders section
+        orders_group = QGroupBox("📦 Recent Orders (Last 7 Days)")
+        orders_group.setStyleSheet("""
+            QGroupBox {
+                font-size: 14px;
+                font-weight: bold;
+                color: #ffffff;
+                border: 1px solid #555;
+                border-radius: 8px;
+                margin-top: 10px;
+                padding-top: 10px;
+            }
+            QGroupBox::title {
+                subcontrol-origin: margin;
+                left: 10px;
+                padding: 0 5px;
+            }
+        """)
+        orders_group_layout = QVBoxLayout(orders_group)
+        
+        self.dash_recent_orders_table = QTableWidget(0, 5)
+        self.dash_recent_orders_table.setHorizontalHeaderLabels(["Order #", "Patient", "Date", "Status", "Items"])
+        self.dash_recent_orders_table.horizontalHeader().setStretchLastSection(True)
+        self.dash_recent_orders_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        self.dash_recent_orders_table.setMaximumHeight(250)
+        self.dash_recent_orders_table.setStyleSheet("QTableWidget { background-color: #2B2B2B; color: white; }")
+        self.dash_recent_orders_table.itemDoubleClicked.connect(self._dash_go_to_order)
+        orders_group_layout.addWidget(self.dash_recent_orders_table)
+        
+        left_col.addWidget(orders_group)
+        left_col.addStretch()
+
+        content_layout.addLayout(left_col, 2)
+
+        # Right Column: Quick Actions & Alerts
+        right_col = QVBoxLayout()
+        right_col.setSpacing(15)
+
+        # Quick Actions section
+        actions_group = QGroupBox("⚡ Quick Actions")
+        actions_group.setStyleSheet("""
+            QGroupBox {
+                font-size: 14px;
+                font-weight: bold;
+                color: #ffffff;
+                border: 1px solid #555;
+                border-radius: 8px;
+                margin-top: 10px;
+                padding-top: 10px;
+            }
+            QGroupBox::title {
+                subcontrol-origin: margin;
+                left: 10px;
+                padding: 0 5px;
+            }
+        """)
+        actions_layout = QVBoxLayout(actions_group)
+        actions_layout.setSpacing(10)
+
+        action_btn_style = """
+            QPushButton {
+                background-color: #3C3C3C;
+                color: white;
+                padding: 12px;
+                border-radius: 6px;
+                font-size: 13px;
+                text-align: left;
+            }
+            QPushButton:hover { background-color: #505050; }
+        """
+
+        btn_new_order = QPushButton("➕  New Order")
+        btn_new_order.setStyleSheet(action_btn_style)
+        btn_new_order.clicked.connect(self._dash_new_order)
+        actions_layout.addWidget(btn_new_order)
+
+        btn_new_patient = QPushButton("👤  New Patient")
+        btn_new_patient.setStyleSheet(action_btn_style)
+        btn_new_patient.clicked.connect(self._dash_new_patient)
+        actions_layout.addWidget(btn_new_patient)
+
+        btn_process_refills = QPushButton("💊  Process Refills")
+        btn_process_refills.setStyleSheet(action_btn_style)
+        btn_process_refills.clicked.connect(self._dash_go_to_refills)
+        actions_layout.addWidget(btn_process_refills)
+
+        btn_view_unbilled = QPushButton("💰  View Unbilled Orders")
+        btn_view_unbilled.setStyleSheet(action_btn_style)
+        btn_view_unbilled.clicked.connect(self._dash_view_unbilled)
+        actions_layout.addWidget(btn_view_unbilled)
+
+        btn_new_task = QPushButton("✅  New Task")
+        btn_new_task.setStyleSheet(action_btn_style)
+        btn_new_task.clicked.connect(lambda: self.open_task_dialog())
+        actions_layout.addWidget(btn_new_task)
+
+        right_col.addWidget(actions_group)
+
+        # Alerts section
+        alerts_group = QGroupBox("⚠️ Alerts")
+        alerts_group.setStyleSheet("""
+            QGroupBox {
+                font-size: 14px;
+                font-weight: bold;
+                color: #ffffff;
+                border: 1px solid #555;
+                border-radius: 8px;
+                margin-top: 10px;
+                padding-top: 10px;
+            }
+            QGroupBox::title {
+                subcontrol-origin: margin;
+                left: 10px;
+                padding: 0 5px;
+            }
+        """)
+        alerts_layout = QVBoxLayout(alerts_group)
+        
+        self.dash_alerts_list = QListWidget()
+        self.dash_alerts_list.setStyleSheet("""
+            QListWidget {
+                background-color: #2B2B2B;
+                color: white;
+                border: none;
+            }
+            QListWidget::item {
+                padding: 8px;
+                border-bottom: 1px solid #444;
+            }
+            QListWidget::item:hover {
+                background-color: #3C3C3C;
+            }
+        """)
+        self.dash_alerts_list.setMaximumHeight(200)
+        alerts_layout.addWidget(self.dash_alerts_list)
+        
+        right_col.addWidget(alerts_group)
+        right_col.addStretch()
+
+        content_layout.addLayout(right_col, 1)
+
+        layout.addLayout(content_layout)
+
+        # Add to main tabs as FIRST tab
+        self.main_tabs.insertTab(0, dashboard_tab, "🏠 Dashboard")
+        self.main_tabs.setCurrentIndex(0)
+
+        # Load dashboard data
+        self.refresh_dashboard()
+
+    def refresh_dashboard(self):
+        """Refresh all dashboard widgets with current data."""
+        try:
+            conn = sqlite3.connect(self.orders_database_file)
+            cur = conn.cursor()
+            today = datetime.now().strftime('%Y-%m-%d')
+            week_later = (datetime.now() + timedelta(days=7)).strftime('%Y-%m-%d')
+            month_start = datetime.now().replace(day=1).strftime('%Y-%m-%d')
+            week_ago = (datetime.now() - timedelta(days=7)).strftime('%Y-%m-%d')
+
+            # Count Unbilled / On Hold orders
+            cur.execute("""
+                SELECT COUNT(*) FROM orders 
+                WHERE (order_status = 'Unbilled' OR order_status = 'On Hold')
+                AND deleted_at IS NULL
+            """)
+            unbilled_count = cur.fetchone()[0] or 0
+            self.dash_unbilled_label.setText(str(unbilled_count))
+
+            # Count refills due this week
+            cur.execute("""
+                SELECT COUNT(DISTINCT o.id) FROM orders o
+                JOIN order_items oi ON o.id = oi.order_id
+                WHERE o.deleted_at IS NULL
+                AND oi.days_supply IS NOT NULL 
+                AND oi.days_supply > 0
+                AND CAST(oi.refills AS INTEGER) > 0
+                AND DATE(o.order_date, '+' || CAST(oi.days_supply AS TEXT) || ' days') BETWEEN ? AND ?
+            """, (today, week_later))
+            refills_count = cur.fetchone()[0] or 0
+            self.dash_refills_label.setText(str(refills_count))
+
+            # Count tasks due today
+            cur.execute("""
+                SELECT COUNT(*) FROM tasks 
+                WHERE due_date = ? AND status != 'Completed' AND status != 'Cancelled'
+            """, (today,))
+            tasks_count = cur.fetchone()[0] or 0
+            self.dash_tasks_label.setText(str(tasks_count))
+
+            # Count orders this month
+            cur.execute("""
+                SELECT COUNT(*) FROM orders 
+                WHERE order_date >= ? AND deleted_at IS NULL
+            """, (month_start,))
+            orders_month = cur.fetchone()[0] or 0
+            self.dash_orders_month_label.setText(str(orders_month))
+
+            conn.close()
+
+            # Count total patients
+            try:
+                conn_p = sqlite3.connect(self.patient_database_file)
+                cur_p = conn_p.cursor()
+                cur_p.execute("SELECT COUNT(*) FROM patients")
+                patients_count = cur_p.fetchone()[0] or 0
+                self.dash_patients_label.setText(str(patients_count))
+                conn_p.close()
+            except:
+                self.dash_patients_label.setText("--")
+
+            # Load tasks due today
+            self._load_dash_tasks_today()
+
+            # Load recent orders
+            self._load_dash_recent_orders()
+
+            # Load alerts
+            self._load_dash_alerts()
+
+        except Exception as e:
+            print(f"Dashboard refresh error: {e}")
+
+    def _load_dash_tasks_today(self):
+        """Load tasks due today into dashboard table."""
+        try:
+            today = datetime.now().strftime('%Y-%m-%d')
+            conn = sqlite3.connect(self.orders_database_file)
+            cur = conn.cursor()
+            cur.execute("""
+                SELECT id, priority, title, patient_name, status 
+                FROM tasks 
+                WHERE due_date = ? AND status != 'Completed' AND status != 'Cancelled'
+                ORDER BY 
+                    CASE priority 
+                        WHEN 'Urgent' THEN 1 
+                        WHEN 'High' THEN 2 
+                        WHEN 'Normal' THEN 3 
+                        ELSE 4 
+                    END
+                LIMIT 10
+            """, (today,))
+            rows = cur.fetchall()
+            conn.close()
+
+            self.dash_tasks_table.setRowCount(0)
+            for r in rows:
+                tid, priority, title, patient, status = r
+                row = self.dash_tasks_table.rowCount()
+                self.dash_tasks_table.insertRow(row)
+                
+                priority_item = QTableWidgetItem(priority or "Normal")
+                if priority == "Urgent":
+                    priority_item.setForeground(QColor("#e74c3c"))
+                elif priority == "High":
+                    priority_item.setForeground(QColor("#f39c12"))
+                priority_item.setData(Qt.ItemDataRole.UserRole, tid)
+                
+                self.dash_tasks_table.setItem(row, 0, priority_item)
+                self.dash_tasks_table.setItem(row, 1, QTableWidgetItem(title or ""))
+                self.dash_tasks_table.setItem(row, 2, QTableWidgetItem(patient or ""))
+                self.dash_tasks_table.setItem(row, 3, QTableWidgetItem(status or ""))
+        except Exception as e:
+            print(f"Dashboard tasks error: {e}")
+
+    def _load_dash_recent_orders(self):
+        """Load recent orders into dashboard table."""
+        try:
+            week_ago = (datetime.now() - timedelta(days=7)).strftime('%Y-%m-%d')
+            conn = sqlite3.connect(self.orders_database_file)
+            cur = conn.cursor()
+            cur.execute("""
+                SELECT o.id, o.order_number, o.patient_last_name, o.patient_first_name, 
+                       o.order_date, o.order_status, COUNT(oi.id) as item_count
+                FROM orders o
+                LEFT JOIN order_items oi ON o.id = oi.order_id
+                WHERE o.order_date >= ? AND o.deleted_at IS NULL
+                GROUP BY o.id
+                ORDER BY o.order_date DESC, o.id DESC
+                LIMIT 15
+            """, (week_ago,))
+            rows = cur.fetchall()
+            conn.close()
+
+            self.dash_recent_orders_table.setRowCount(0)
+            for r in rows:
+                oid, order_num, last, first, odate, status, items = r
+                row = self.dash_recent_orders_table.rowCount()
+                self.dash_recent_orders_table.insertRow(row)
+                
+                order_item = QTableWidgetItem(order_num or f"ORD-{oid}")
+                order_item.setData(Qt.ItemDataRole.UserRole, oid)
+                
+                patient_name = f"{last}, {first}" if last and first else (last or first or "Unknown")
+                
+                status_item = QTableWidgetItem(status or "Pending")
+                if status == "Unbilled" or status == "On Hold":
+                    status_item.setForeground(QColor("#ADFF2F"))
+                elif status == "Shipped":
+                    status_item.setForeground(QColor("#ffc107"))
+                elif status == "Delivered":
+                    status_item.setForeground(QColor("#28a745"))
+                
+                self.dash_recent_orders_table.setItem(row, 0, order_item)
+                self.dash_recent_orders_table.setItem(row, 1, QTableWidgetItem(patient_name))
+                self.dash_recent_orders_table.setItem(row, 2, QTableWidgetItem(odate or ""))
+                self.dash_recent_orders_table.setItem(row, 3, status_item)
+                self.dash_recent_orders_table.setItem(row, 4, QTableWidgetItem(str(items or 0)))
+        except Exception as e:
+            print(f"Dashboard orders error: {e}")
+
+    def _load_dash_alerts(self):
+        """Load alerts into dashboard alerts list."""
+        try:
+            self.dash_alerts_list.clear()
+            alerts = []
+            today = datetime.now().strftime('%Y-%m-%d')
+            
+            conn = sqlite3.connect(self.orders_database_file)
+            cur = conn.cursor()
+
+            # Check for overdue tasks
+            cur.execute("""
+                SELECT COUNT(*) FROM tasks 
+                WHERE due_date < ? AND status != 'Completed' AND status != 'Cancelled'
+            """, (today,))
+            overdue_tasks = cur.fetchone()[0] or 0
+            if overdue_tasks > 0:
+                alerts.append(f"🔴 {overdue_tasks} overdue task{'s' if overdue_tasks > 1 else ''}")
+
+            # Check for orders unbilled > 7 days
+            week_ago = (datetime.now() - timedelta(days=7)).strftime('%Y-%m-%d')
+            cur.execute("""
+                SELECT COUNT(*) FROM orders 
+                WHERE order_status = 'Unbilled' AND order_date < ? AND deleted_at IS NULL
+            """, (week_ago,))
+            old_unbilled = cur.fetchone()[0] or 0
+            if old_unbilled > 0:
+                alerts.append(f"🟡 {old_unbilled} order{'s' if old_unbilled > 1 else ''} unbilled > 7 days")
+
+            # Check for low inventory (if inventory table exists)
+            try:
+                cur.execute("""
+                    SELECT COUNT(*) FROM inventory 
+                    WHERE CAST(current_stock AS INTEGER) <= CAST(reorder_point AS INTEGER)
+                    AND CAST(reorder_point AS INTEGER) > 0
+                """)
+                low_stock = cur.fetchone()[0] or 0
+                if low_stock > 0:
+                    alerts.append(f"🟠 {low_stock} inventory item{'s' if low_stock > 1 else ''} low on stock")
+            except:
+                pass
+
+            conn.close()
+
+            if alerts:
+                for alert in alerts:
+                    item = QListWidgetItem(alert)
+                    self.dash_alerts_list.addItem(item)
+            else:
+                item = QListWidgetItem("✅ No alerts - everything looks good!")
+                item.setForeground(QColor("#27ae60"))
+                self.dash_alerts_list.addItem(item)
+
+        except Exception as e:
+            print(f"Dashboard alerts error: {e}")
+            item = QListWidgetItem("⚠️ Could not load alerts")
+            self.dash_alerts_list.addItem(item)
+
+    def _dash_go_to_task(self, item):
+        """Navigate to Tasks tab when clicking a task in dashboard."""
+        row = item.row()
+        task_id = self.dash_tasks_table.item(row, 0).data(Qt.ItemDataRole.UserRole)
+        # Switch to Tasks tab
+        for i in range(self.main_tabs.count()):
+            if "Tasks" in self.main_tabs.tabText(i):
+                self.main_tabs.setCurrentIndex(i)
+                break
+
+    def _dash_go_to_order(self, item):
+        """Navigate to Orders tab when clicking an order in dashboard."""
+        row = item.row()
+        order_id = self.dash_recent_orders_table.item(row, 0).data(Qt.ItemDataRole.UserRole)
+        # Switch to Orders tab
+        for i in range(self.main_tabs.count()):
+            if "Orders" in self.main_tabs.tabText(i):
+                self.main_tabs.setCurrentIndex(i)
+                break
+
+    def _dash_new_order(self):
+        """Open new order wizard from dashboard."""
+        try:
+            self.open_new_order_wizard()
+        except Exception as e:
+            QMessageBox.warning(self, "New Order", f"Could not open order wizard: {e}")
+
+    def _dash_new_patient(self):
+        """Open new patient dialog from dashboard."""
+        try:
+            self.add_new_patient()
+        except Exception as e:
+            QMessageBox.warning(self, "New Patient", f"Could not open patient dialog: {e}")
+
+    def _dash_go_to_refills(self):
+        """Navigate to Process Refills tab."""
+        for i in range(self.main_tabs.count()):
+            if "Refills" in self.main_tabs.tabText(i):
+                self.main_tabs.setCurrentIndex(i)
+                break
+
+    def _dash_view_unbilled(self):
+        """Navigate to Orders tab and filter by Unbilled."""
+        for i in range(self.main_tabs.count()):
+            if "Orders" in self.main_tabs.tabText(i):
+                self.main_tabs.setCurrentIndex(i)
+                # Set filter to Unbilled if filter combo exists
+                if hasattr(self, 'filter_status'):
+                    idx = self.filter_status.findText("Unbilled")
+                    if idx >= 0:
+                        self.filter_status.setCurrentIndex(idx)
+                break
 
     def create_patient_management_tab(self):
         """Create the Patient Management tab for DME software"""
@@ -9788,8 +10458,8 @@ class PDFViewer(QMainWindow):
         # Set up table columns
         columns = [
             "Order #", "Patient", "HCPCS", "Item #", "Description",
-            "Qty Disp.", "Refills", "Days", "Refill Due Date",
-            "Order Date", "Delivery Date", "Pickup Date", "Status", "Tracking #", "Notes", "Paid", "Paid Date"
+            "Qty Disp.", "Refills", "Days", "Order Date",
+            "Refill Due Date", "Delivery Date", "Pickup Date", "Status", "Tracking #", "Notes", "Paid", "Paid Date"
         ]
         self.orders_table.setColumnCount(len(columns))
         self.orders_table.setHorizontalHeaderLabels(columns)
@@ -10058,67 +10728,89 @@ class PDFViewer(QMainWindow):
                     self.orders_table.setItem(row, 3, QTableWidgetItem(item_number or ""))
                     self.orders_table.setItem(row, 4, QTableWidgetItem(item_desc or ""))
                     self.orders_table.setItem(row, 5, QTableWidgetItem(str(qty) if qty else ""))
-                    self.orders_table.setItem(row, 6, QTableWidgetItem(str(refills_val) if refills_val else ""))
+                    
+                    # Refills column - highlight in red if 0 refills remaining
+                    refills_item = QTableWidgetItem(str(refills_val) if refills_val else "0")
+                    try:
+                        refills_int = int(refills_val) if refills_val else 0
+                        if refills_int <= 0:
+                            refills_item.setBackground(QColor(220, 53, 69, 180))  # Red background
+                            refills_item.setForeground(QColor(255, 255, 255))  # White text
+                            font = refills_item.font()
+                            font.setBold(True)
+                            refills_item.setFont(font)
+                    except Exception:
+                        pass
+                    self.orders_table.setItem(row, 6, refills_item)
                     self.orders_table.setItem(row, 7, QTableWidgetItem(str(days_val) if days_val else ""))
 
                     # Calculate Refill Due Date for this item
                     due_item = QTableWidgetItem("")
+                    
+                    # Check if item has refills remaining
                     try:
-                        if days_val and (order_date or rx_date):
-                            from datetime import datetime, timedelta
-                            base_str = order_date or rx_date
-                            base_date = None
-                            for fmt in ("%Y-%m-%d", "%Y/%m/%d", "%m/%d/%Y", "%m-%d-%Y", "%Y-%m-%d %H:%M:%S", "%Y/%m/%d %H:%M:%S"):
-                                try:
-                                    base_date = datetime.strptime(str(base_str).split(" ")[0], fmt)
-                                    break
-                                except Exception:
-                                    continue
-                            if base_date:
-                                due_dt = base_date + timedelta(days=int(float(days_val)))
-                                due_str_iso = due_dt.strftime("%Y-%m-%d")
-                                try:
-                                    due_item.setText(self.format_date_display(due_str_iso))
-                                except Exception:
-                                    due_item.setText(due_str_iso)
-
-                                # Apply row tint and emphasis
-                                try:
-                                    from datetime import timedelta as _td
-                                    today = datetime.now().date()
-                                    due_date = due_dt.date()
-                                except Exception:
-                                    due_date = None
-
-                                if due_date is not None:
-                                    if today >= due_date:
-                                        # Due or overdue: bright green and bold in cell
-                                        tint = QColor(40, 167, 69, 110)
-                                        font = due_item.font()
-                                        font.setBold(True)
-                                        due_item.setFont(font)
-                                    elif today >= (due_date - _td(days=5)):
-                                        # Within 5-day window: soft green and bold due cell
-                                        tint = QColor(40, 167, 69, 60)
-                                        font = due_item.font()
-                                        font.setBold(True)
-                                        due_item.setFont(font)
-                                    else:
-                                        # Not due yet (outside window): red
-                                        tint = QColor(220, 53, 69, 60)
-
-                                    # Set the background tint for the entire row (light alpha)
-                                    for c in range(self.orders_table.columnCount()):
-                                        cell = self.orders_table.item(row, c)
-                                        if cell is None:
-                                            cell = QTableWidgetItem("")
-                                            self.orders_table.setItem(row, c, cell)
-                                        cell.setBackground(tint)
+                        refills_int = int(refills_val) if refills_val else 0
                     except Exception:
-                        pass
+                        refills_int = 0
+                    
+                    # If no refills remaining, show X with strikethrough style
+                    if refills_int <= 0:
+                        due_item.setText("✗")
+                        due_item.setBackground(QColor(220, 53, 69, 180))  # Red background
+                        due_item.setForeground(QColor(255, 255, 255))  # White text
+                        font = due_item.font()
+                        font.setBold(True)
+                        due_item.setFont(font)
+                        due_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                    else:
+                        try:
+                            if days_val and (order_date or rx_date):
+                                from datetime import datetime, timedelta
+                                base_str = order_date or rx_date
+                                base_date = None
+                                for fmt in ("%Y-%m-%d", "%Y/%m/%d", "%m/%d/%Y", "%m-%d-%Y", "%Y-%m-%d %H:%M:%S", "%Y/%m/%d %H:%M:%S"):
+                                    try:
+                                        base_date = datetime.strptime(str(base_str).split(" ")[0], fmt)
+                                        break
+                                    except Exception:
+                                        continue
+                                if base_date:
+                                    due_dt = base_date + timedelta(days=int(float(days_val)))
+                                    due_str_iso = due_dt.strftime("%Y-%m-%d")
+                                    try:
+                                        due_item.setText(self.format_date_display(due_str_iso))
+                                    except Exception:
+                                        due_item.setText(due_str_iso)
 
-                    self.orders_table.setItem(row, 8, due_item)  # Refill Due Date
-                    self.orders_table.setItem(row, 9, QTableWidgetItem(order_date_display))
+                                    # Apply row tint and emphasis
+                                    try:
+                                        from datetime import timedelta as _td
+                                        today = datetime.now().date()
+                                        due_date = due_dt.date()
+                                    except Exception:
+                                        due_date = None
+
+                                    if due_date is not None:
+                                        if today >= due_date:
+                                            # Due or overdue: bright green (due date cell only)
+                                            due_item.setBackground(QColor(40, 167, 69, 120))
+                                            font = due_item.font()
+                                            font.setBold(True)
+                                            due_item.setFont(font)
+                                        elif today >= (due_date - _td(days=5)):
+                                            # Within 5-day window: yellow (due date cell only)
+                                            due_item.setBackground(QColor(255, 193, 7, 120))
+                                            font = due_item.font()
+                                            font.setBold(True)
+                                            due_item.setFont(font)
+                                        else:
+                                            # Not due yet (outside window): red (due date cell only)
+                                            due_item.setBackground(QColor(220, 53, 69, 60))
+                        except Exception:
+                            pass
+
+                    self.orders_table.setItem(row, 8, QTableWidgetItem(order_date_display))  # Order Date
+                    self.orders_table.setItem(row, 9, due_item)  # Refill Due Date
                     self.orders_table.setItem(row, 10, QTableWidgetItem(delivery_display))
                     self.orders_table.setItem(row, 11, QTableWidgetItem(pickup_date_display))
                     
@@ -10155,6 +10847,14 @@ class PDFViewer(QMainWindow):
                     else:
                         self.orders_table.setItem(row, 15, QTableWidgetItem(""))
                         self.orders_table.setItem(row, 16, QTableWidgetItem(""))
+                    
+                    # Key lime green row highlight for Unbilled or On Hold status
+                    if "Unbilled" in status_text or "On Hold" in status_text:
+                        key_lime = QColor("#ADFF2F")  # Key lime green
+                        for c in range(self.orders_table.columnCount()):
+                            cell = self.orders_table.item(row, c)
+                            if cell:
+                                cell.setBackground(key_lime)
             
             # Set column widths
             header = self.orders_table.horizontalHeader()
@@ -11211,14 +11911,15 @@ class PDFViewer(QMainWindow):
             conn = sqlite3.connect(self.orders_database_file)
             cursor = conn.cursor()
             
-            # Get the original order
+            # Get the original order including parent_order_id for refill chain
             cursor.execute("""
                 SELECT 
                     rx_date, order_date, patient_last_name, patient_first_name, patient_dob,
                     patient_address, patient_phone, patient_secondary_contact,
                     icd_code_1, icd_code_2, icd_code_3, icd_code_4, icd_code_5,
                     prescriber_name, prescriber_npi, primary_insurance, primary_insurance_id,
-                    secondary_insurance, secondary_insurance_id, billing_selection, order_status
+                    secondary_insurance, secondary_insurance_id, billing_selection, order_status,
+                    COALESCE(parent_order_id, NULL) as parent_order_id
                 FROM orders WHERE id = ?
             """, (original_order_id,))
             
@@ -11228,6 +11929,19 @@ class PDFViewer(QMainWindow):
                 conn.close()
                 QMessageBox.warning(self, "Order Not Found", f"Original order ID {original_order_id} not found.")
                 return False
+            
+            # Determine base order id (root of chain) and compute next refill number
+            src_parent_order_id = original_order[21]  # parent_order_id from query
+            base_order_id = src_parent_order_id if src_parent_order_id else original_order_id
+            
+            # Get max refill number for this base order
+            cursor.execute("""
+                SELECT COALESCE(MAX(refill_number), 0)
+                FROM orders 
+                WHERE id = ? OR parent_order_id = ?
+            """, (base_order_id, base_order_id))
+            max_refill = cursor.fetchone()[0] or 0
+            next_refill_number = max_refill + 1
             
             # Create new order with today's date as order date
             today = datetime.now().strftime("%m/%d/%Y")
@@ -11262,10 +11976,15 @@ class PDFViewer(QMainWindow):
                 original_order[17], # secondary_insurance
                 original_order[18], # secondary_insurance_id
                 original_order[19], # billing_selection
-                "Pending",          # order_status
-                original_order_id,  # parent_order_id
-                1                   # refill_number (first refill)
+                "Unbilled",         # order_status
+                base_order_id,      # parent_order_id (always points to root)
+                next_refill_number  # refill_number (computed)
             ))
+            
+            # Mark source order as refill-completed and locked
+            cursor.execute("""
+                UPDATE orders SET refill_completed = 1, is_locked = 1 WHERE id = ?
+            """, (original_order_id,))
             
             new_order_id = cursor.lastrowid
             
@@ -11313,7 +12032,6 @@ class PDFViewer(QMainWindow):
             if 'conn' in locals():
                 conn.close()
             return False
-
     def open_billing_report_from_billing_tab(self):
         """Switch to Reports tab and generate Billing report for the current date range."""
         try:
@@ -14131,11 +14849,27 @@ class PDFViewer(QMainWindow):
                 tools_menu.addAction(backup_now_action)
         except Exception:
             pass
+        
+        # HCPCS Description Manager
+        tools_menu.addSeparator()
+        hcpcs_manager_action = QAction('Manage HCPCS Descriptions…', self)
+        hcpcs_manager_action.setToolTip('Edit simplified descriptions for HCPCS codes used in fax forms')
+        hcpcs_manager_action.triggered.connect(self.show_hcpcs_manager)
+        tools_menu.addAction(hcpcs_manager_action)
 
     def show_settings_dialog(self):
         """Show the settings dialog."""
         dialog = SettingsDialog(self, self.settings)
         dialog.exec()
+    
+    def show_hcpcs_manager(self):
+        """Show the HCPCS description manager dialog."""
+        try:
+            from dmelogic.ui.dialogs.hcpcs_manager_dialog import HCPCSManagerDialog
+            dialog = HCPCSManagerDialog(self)
+            dialog.exec()
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to open HCPCS manager: {e}")
 
     def show_deleted_orders_log(self):
         """Show a dialog with all deleted orders."""
@@ -15161,6 +15895,22 @@ class PDFViewer(QMainWindow):
 
         try:
             cursor.execute("ALTER TABLE orders ADD COLUMN doctor_directions TEXT")
+        except sqlite3.OperationalError:
+            pass  # Column already exists
+
+        # Second prescriber columns (for orders with multiple RXs from different doctors)
+        try:
+            cursor.execute("ALTER TABLE orders ADD COLUMN rx_date_2 TEXT")
+        except sqlite3.OperationalError:
+            pass  # Column already exists
+        
+        try:
+            cursor.execute("ALTER TABLE orders ADD COLUMN prescriber_name_2 TEXT")
+        except sqlite3.OperationalError:
+            pass  # Column already exists
+        
+        try:
+            cursor.execute("ALTER TABLE orders ADD COLUMN prescriber_npi_2 TEXT")
         except sqlite3.OperationalError:
             pass  # Column already exists
 
@@ -16961,8 +17711,12 @@ class PDFViewer(QMainWindow):
             traceback.print_exc()
             return None, "failed"
 
-    def _create_or_update_prescription_request_task(self, patient_id, patient_name, prescriber_name, items_count, file_name):
-        """Create or update task for new prescription request with action history tracking."""
+    def _create_or_update_prescription_request_task(self, patient_id, patient_name, prescriber_name, items_count, file_name, file_path=None):
+        """Create or update task for new prescription request with action history tracking.
+        
+        Args:
+            file_path: Full path to the generated PDF to attach to the task
+        """
         try:
             from datetime import datetime
             timestamp = datetime.now().strftime("%Y-%m-%d %I:%M %p")
@@ -17022,9 +17776,9 @@ class PDFViewer(QMainWindow):
                 cur.execute("""
                     INSERT INTO tasks (
                         title, status, priority, patient_id, patient_name, 
-                        action_history, notes, assigned_to_user
+                        action_history, notes, assigned_to_user, document_filename
                     )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, (
                     f"[{timestamp}] New Prescription Request - {patient_name}",
                     "Pending",
@@ -17033,7 +17787,8 @@ class PDFViewer(QMainWindow):
                     patient_name,
                     action,
                     f"New prescription request generated for {patient_name}.\nPrescriber: {prescriber_name}\nItems: {items_count}\nFile: {file_name}",
-                    "Unassigned"
+                    "Unassigned",
+                    file_path
                 ))
                 
                 task_id = cur.lastrowid
@@ -17894,10 +18649,10 @@ class PDFViewer(QMainWindow):
                 
                 task_cur.execute(
                     """
-                    INSERT INTO tasks (title, description, status, priority, created_date, due_date, patient_name, category)
-                    VALUES (?, ?, 'Pending', 'High', CURRENT_TIMESTAMP, date('now', '+3 days'), ?, 'Fax Follow-up')
+                    INSERT INTO tasks (title, description, status, priority, created_date, due_date, patient_name, category, document_filename)
+                    VALUES (?, ?, 'Pending', 'High', CURRENT_TIMESTAMP, date('now', '+3 days'), ?, 'Fax Follow-up', ?)
                     """,
-                    (task_title, task_description, f"{first_name} {last_name}")
+                    (task_title, task_description, f"{first_name} {last_name}", final_fax_path)
                 )
                 task_conn.commit()
                 task_conn.close()
@@ -18181,8 +18936,8 @@ class PDFViewer(QMainWindow):
             # Store all items for filtering
             all_items = inventory_items.copy()
             
-            # Dictionary to preserve quantities across filter changes: {description: quantity}
-            item_quantities = {}
+            # Dictionary to preserve quantities and HCPCS across filter changes: {description: (hcpcs, quantity)}
+            item_data = {}
             
             def populate_table(filter_text=''):
                 """Populate table with filtered items while preserving quantities"""
@@ -18192,8 +18947,9 @@ class PDFViewer(QMainWindow):
                     if desc_item:
                         desc = desc_item.text()
                         qty_widget = items_table.cellWidget(i, 1)
-                        if qty_widget:
-                            item_quantities[desc] = qty_widget.value()
+                        if qty_widget and desc in item_data:
+                            hcpcs = item_data[desc][0]
+                            item_data[desc] = (hcpcs, qty_widget.value())
                 
                 items_table.setRowCount(0)
                 # Filter by both description and hcpcs_code
@@ -18206,6 +18962,10 @@ class PDFViewer(QMainWindow):
                 
                 items_table.setRowCount(len(filtered))
                 for i, (item_desc, hcpcs) in enumerate(filtered):
+                    # Store HCPCS code for this description if not already stored
+                    if item_desc not in item_data:
+                        item_data[item_desc] = (hcpcs or '', 0)
+                    
                     # Description
                     desc_item = QTableWidgetItem(item_desc)
                     desc_item.setFlags(Qt.ItemFlag.ItemIsEnabled)
@@ -18215,7 +18975,7 @@ class PDFViewer(QMainWindow):
                     qty_spin = QSpinBox()
                     qty_spin.setMinimum(0)
                     qty_spin.setMaximum(999)
-                    qty_spin.setValue(item_quantities.get(item_desc, 0))
+                    qty_spin.setValue(item_data[item_desc][1])
                     items_table.setCellWidget(i, 1, qty_spin)
             
             # Initial populate
@@ -18253,11 +19013,13 @@ class PDFViewer(QMainWindow):
                 if desc_item:
                     desc = desc_item.text()
                     qty_widget = items_table.cellWidget(i, 1)
-                    if qty_widget:
-                        item_quantities[desc] = qty_widget.value()
+                    if qty_widget and desc in item_data:
+                        hcpcs = item_data[desc][0]
+                        item_data[desc] = (hcpcs, qty_widget.value())
             
-            # Get ALL items with quantity > 0 from the saved quantities dictionary
-            selected_items = [(desc, str(qty)) for desc, qty in item_quantities.items() if qty > 0]
+            # Get ALL items with quantity > 0 from the saved data dictionary
+            # Format: (description, hcpcs, quantity)
+            selected_items = [(desc, hcpcs, str(qty)) for desc, (hcpcs, qty) in item_data.items() if qty > 0]
             
             if not selected_items:
                 QMessageBox.warning(self, 'New Prescription Request', 'Please enter quantities for at least one item.')
@@ -18538,14 +19300,17 @@ class PDFViewer(QMainWindow):
             conn = sqlite3.connect(self.inventory_database_file)
             cur = conn.cursor()
             cur.execute("SELECT DISTINCT description, hcpcs_code FROM inventory WHERE description IS NOT NULL AND description != '' ORDER BY description")
-            inventory_items = cur.fetchall()  # List of tuples (description, hcpcs_code)
+            inventory_raw = cur.fetchall()  # List of tuples (description, hcpcs_code)
             conn.close()
+            
+            # Extract HCPCS codes (part before hyphen) for each item
+            inventory_items = [(desc, (hcpcs.split('-')[0].strip() if hcpcs else '')) for desc, hcpcs in inventory_raw]
             
             # Store all items for filtering
             all_items = inventory_items.copy()
             
-            # Dictionary to preserve quantities across filter changes: {description: quantity}
-            item_quantities = {}
+            # Dictionary to preserve quantities and HCPCS across filter changes: {description: (hcpcs, quantity)}
+            item_data = {}
             
             def populate_table(filter_text=''):
                 """Populate table with filtered items while preserving quantities"""
@@ -18555,8 +19320,9 @@ class PDFViewer(QMainWindow):
                     if desc_item:
                         desc = desc_item.text()
                         qty_widget = items_table.cellWidget(i, 1)
-                        if qty_widget:
-                            item_quantities[desc] = qty_widget.value()
+                        if qty_widget and desc in item_data:
+                            hcpcs = item_data[desc][0]
+                            item_data[desc] = (hcpcs, qty_widget.value())
                 
                 items_table.setRowCount(0)
                 # Filter by both description and hcpcs_code
@@ -18569,6 +19335,10 @@ class PDFViewer(QMainWindow):
                 
                 items_table.setRowCount(len(filtered))
                 for i, (item_desc, hcpcs) in enumerate(filtered):
+                    # Store HCPCS code for this description if not already stored
+                    if item_desc not in item_data:
+                        item_data[item_desc] = (hcpcs or '', 0)
+                    
                     # Description
                     desc_item = QTableWidgetItem(item_desc)
                     desc_item.setFlags(Qt.ItemFlag.ItemIsEnabled)
@@ -18578,7 +19348,7 @@ class PDFViewer(QMainWindow):
                     qty_spin = QSpinBox()
                     qty_spin.setMinimum(0)
                     qty_spin.setMaximum(999)
-                    qty_spin.setValue(item_quantities.get(item_desc, 0))
+                    qty_spin.setValue(item_data[item_desc][1])
                     items_table.setCellWidget(i, 1, qty_spin)
             
             # Initial populate
@@ -18616,11 +19386,13 @@ class PDFViewer(QMainWindow):
                 if desc_item:
                     desc = desc_item.text()
                     qty_widget = items_table.cellWidget(i, 1)
-                    if qty_widget:
-                        item_quantities[desc] = qty_widget.value()
+                    if qty_widget and desc in item_data:
+                        hcpcs = item_data[desc][0]
+                        item_data[desc] = (hcpcs, qty_widget.value())
             
-            # Get ALL items with quantity > 0 from the saved quantities dictionary
-            selected_items = [(desc, str(qty)) for desc, qty in item_quantities.items() if qty > 0]
+            # Get ALL items with quantity > 0 from the saved data dictionary
+            # Format: (description, hcpcs, quantity)
+            selected_items = [(desc, hcpcs, str(qty)) for desc, (hcpcs, qty) in item_data.items() if qty > 0]
             
             if not selected_items:
                 QMessageBox.warning(self, 'Transferred Fax', 'Please enter quantities for at least one item.')
@@ -18782,9 +19554,84 @@ class PDFViewer(QMainWindow):
             y -= 0.2*inch
             c.setFont('Helvetica', 10)
             
-            for desc, qty in items:
+            # Get HCPCS mapper for simplified descriptions
+            mapper = get_hcpcs_mapper()
+            hcpcs_overrides = {
+                'A4554': 'A4554- DISPOSABLE UNDERPADS',
+                'T4521': 'T4521- ADULT BRIEFS/ PULL-UPS - SMALL',
+                'T4522': 'T4522- ADULT BRIEFS/ PULL-UPS - MEDIUM',
+                'T4523': 'T4523- ADULT BRIEFS/ PULL-UPS - LARGE',
+                'T4524': 'T4524- ADULT BRIEFS/ PULL-UPS - EXTRA-LARGE',
+                'T4543': 'T4543- ADULT BRIEFS/ PULL-UPS - 2X LARGE',
+                'T4530': "T4530- CHILDREN'S DIAPERS",
+                'T4533': 'T4533- JUNIOR DIAPERS',
+                'A4927': 'A4927- DISPOSABLE GLOVES',
+                'T4537': 'T4537- REUSABLE UNDERPADS (BED SIZE)',
+                'T4540': 'T4540- REUSABLE UNDERPADS (CHAIR SIZE)',
+                'A4402': 'A4402- A&D OINTMENT',
+            }
+            hcpcs_reverse = {v.upper(): k for k, v in hcpcs_overrides.items()}
+            # Last-resort name sniff if hcpcs is missing from upstream data
+            name_to_hcpcs = [
+                ('FITRIGHT BRIEFS', 'T4524'),
+                ('FITRIGHT UNDERPADS', 'A4554'),
+                ('UNDERPAD', 'A4554'),
+                ('GLOVE', 'A4927'),
+            ]
+            
+            for desc, hcpcs, qty in items:
+                # Use mapper to get simplified description (falls back to original if not mapped)
+                mapped_desc = mapper.get_description(hcpcs or '', desc or '', allow_selection=False)
+                
+                # If multiple descriptions returned, take first one (user can change via manager)
+                if isinstance(mapped_desc, list) and mapped_desc:
+                    mapped_desc = mapped_desc[0]
+                
                 # Format: - ITEM DESCRIPTION Qty/Month: number
-                item_text = f"{str(desc or '').strip()}"
+                item_text = f"{str(mapped_desc or '').strip()}"
+                hcpcs_code = (hcpcs or '').strip().upper()
+
+                # Normalize bed vs chair underpads; inventory data sometimes carries the wrong code
+                desc_upper = (desc or mapped_desc or '').strip().upper()
+                if 'UNDERPAD' in desc_upper:
+                    if not hcpcs_code:
+                        if 'BED' in desc_upper:
+                            hcpcs_code = 'T4537'
+                        elif 'CHAIR' in desc_upper:
+                            hcpcs_code = 'T4540'
+                    elif hcpcs_code == 'T4540' and 'BED' in desc_upper and 'CHAIR' not in desc_upper:
+                        hcpcs_code = 'T4537'
+                    elif hcpcs_code == 'T4537' and 'CHAIR' in desc_upper and 'BED' not in desc_upper:
+                        hcpcs_code = 'T4540'
+
+                # Try to pull a HCPCS code from description if missing
+                if not hcpcs_code and desc:
+                    import re
+                    match = re.search(r"\b([A-Za-z]\d{4})\b", desc)
+                    if match:
+                        hcpcs_code = match.group(1).upper()
+
+                # Last-resort: infer by keywords in the description
+                if not hcpcs_code and desc:
+                    desc_upper = desc.upper()
+                    for keyword, inferred in name_to_hcpcs:
+                        if keyword in desc_upper:
+                            hcpcs_code = inferred
+                            break
+
+                # If description exactly matches an override value, recover its code
+                if not hcpcs_code and desc:
+                    desc_upper = desc.strip().upper()
+                    if desc_upper in hcpcs_reverse:
+                        hcpcs_code = hcpcs_reverse[desc_upper]
+
+                # If we have a one-letter + four-digit HCPCS, prefer code-first text
+                if hcpcs_code and len(hcpcs_code) == 5 and hcpcs_code[0].isalpha() and hcpcs_code[1:].isdigit():
+                    override_text = hcpcs_overrides.get(hcpcs_code)
+                    if override_text:
+                        item_text = override_text
+                    else:
+                        item_text = f"{hcpcs_code} - {item_text}" if item_text else hcpcs_code
                 qty_text = f"Qty/Month: {str(qty or '').strip()}"
                 
                 # Draw bullet and item
@@ -18908,8 +19755,8 @@ class PDFViewer(QMainWindow):
                 log_entry += f"Generated by: {generated_by}\n"
                 log_entry += f"Prescriber: {prescriber_name} ({prescriber_title or 'N/A'})\n"
                 log_entry += f"Items Requested:\n"
-                for desc, qty in items:
-                    log_entry += f"  • {desc} (Qty: {qty})\n"
+                for desc, hcpcs, qty in items:
+                    log_entry += f"  • {desc} (HCPCS: {hcpcs or 'N/A'}, Qty: {qty})\n"
                 log_entry += f"File: {out_name}\n"
                 log_entry += "-----------------------------------\n"
                 
@@ -19142,9 +19989,19 @@ class PDFViewer(QMainWindow):
             y -= 0.2*inch
             c.setFont('Helvetica', 10)
             
-            for desc, qty in items:
+            # Get HCPCS mapper for simplified descriptions
+            mapper = get_hcpcs_mapper()
+            
+            for desc, hcpcs, qty in items:
+                # Use mapper to get simplified description (falls back to original if not mapped)
+                mapped_desc = mapper.get_description(hcpcs or '', desc or '', allow_selection=False)
+                
+                # If multiple descriptions returned, take first one (user can change via manager)
+                if isinstance(mapped_desc, list) and mapped_desc:
+                    mapped_desc = mapped_desc[0]
+                
                 # Format: - ITEM DESCRIPTION Qty/Month: number
-                item_text = f"{str(desc or '').strip()}"
+                item_text = f"{str(mapped_desc or '').strip()}"
                 qty_text = f"Qty/Month: {str(qty or '').strip()}"
                 
                 # Draw bullet and item
@@ -19229,7 +20086,12 @@ class PDFViewer(QMainWindow):
 
             # Build final packet
             out_name = f"NewRx_{(last_name or 'Patient').replace(' ', '_')}_{timestamp}.pdf"
-            out_path = os.path.join(self.folder_path, out_name)
+            try:
+                from pathlib import Path
+                downloads = str(Path.home() / "Downloads")
+                out_path = os.path.join(downloads if os.path.exists(downloads) else os.getcwd(), out_name)
+            except Exception:
+                out_path = os.path.join(os.getcwd(), out_name)
 
             # For new prescription requests, just use the cover page (no MD form needed)
             import shutil
@@ -19257,9 +20119,9 @@ class PDFViewer(QMainWindow):
                     log_entry += f"Generated: {timestamp_log} by {performed_by}\n"
                     log_entry += f"Prescriber: {prescriber_name or 'N/A'}\n"
                     log_entry += f"Items Requested:\n"
-                    for desc, qty in items:
+                    for desc, hcpcs, qty in items:
                         if desc.strip():
-                            log_entry += f"  • {desc} - Qty: {qty}/month\n"
+                            log_entry += f"  • {desc} (HCPCS: {hcpcs or 'N/A'}) - Qty: {qty}/month\n"
                     log_entry += f"File: {out_name}\n"
                     
                     cur.execute(
@@ -19293,7 +20155,8 @@ class PDFViewer(QMainWindow):
                             patient_full_name, 
                             prescriber_name, 
                             len(items),
-                            out_name
+                            out_name,
+                            out_path  # Attach the PDF to the task
                         )
                         if task_id:
                             print(f"📋 Task #{task_id} {task_action} for prescription request tracking")
@@ -19421,8 +20284,35 @@ class PDFViewer(QMainWindow):
                 """,
                 (int(order_id),),
             )
-            items = cur.fetchall()
+            items_from_order = cur.fetchall()
             conn.close()
+            
+            # Look up HCPCS codes for each item from inventory database
+            inv_conn = sqlite3.connect(self.inventory_database_file)
+            inv_cur = inv_conn.cursor()
+            items = []
+            for desc, qty in items_from_order:
+                # Try exact match first
+                inv_cur.execute(
+                    "SELECT hcpcs_code FROM inventory WHERE description = ? LIMIT 1",
+                    (desc,)
+                )
+                hcpcs_row = inv_cur.fetchone()
+                
+                # If no exact match, try case-insensitive match
+                if not hcpcs_row:
+                    inv_cur.execute(
+                        "SELECT hcpcs_code FROM inventory WHERE UPPER(description) = UPPER(?) LIMIT 1",
+                        (desc,)
+                    )
+                    hcpcs_row = inv_cur.fetchone()
+                
+                # Extract HCPCS code and get the part before the hyphen
+                hcpcs_full = hcpcs_row[0] if hcpcs_row and hcpcs_row[0] else ''
+                hcpcs = hcpcs_full.split('-')[0].strip() if hcpcs_full else ''
+                print(f"[HCPCS LOOKUP] Item: '{desc}' -> Full: '{hcpcs_full}' -> Code: '{hcpcs}'")
+                items.append((desc, hcpcs, qty))
+            inv_conn.close()
 
             (
                 rx_date, order_date, last_name, first_name,
@@ -19491,9 +20381,32 @@ class PDFViewer(QMainWindow):
 
             # Render items as lines, wrap pages as needed
             if not items:
-                items = [("No items", "-")]
-            for desc, qty in items:
-                line = f"• {str(desc or '').strip()} — Monthly Quantity: {str(qty or '').strip()}"
+                items = [("No items", "", "-")]
+            
+            # Get HCPCS mapper for simplified descriptions
+            mapper = get_hcpcs_mapper()
+            
+            # Debug: Write to fixed path
+            try:
+                with open('C:/hcpcs_debug.txt', 'w', encoding='utf-8') as f:
+                    f.write(f"Items: {items}\n\n")
+                    for desc, hcpcs, qty in items:
+                        mapped = mapper.get_description(hcpcs or '', desc or '', allow_selection=False)
+                        f.write(f"Desc: {desc}\nHCPCS: {hcpcs}\nMapped: {mapped}\n\n")
+            except:
+                pass
+            
+            for desc, hcpcs, qty in items:
+                # Use mapper to get simplified description (falls back to original if not mapped)
+                mapped_desc = mapper.get_description(hcpcs or '', desc or '', allow_selection=False)
+                
+                # If multiple descriptions returned, take first one (user can change via manager)
+                if isinstance(mapped_desc, list) and mapped_desc:
+                    mapped_desc = mapped_desc[0]
+                
+                print(f"[HCPCS MAPPER] HCPCS: '{hcpcs}' -> Original: '{desc}' -> Mapped: '{mapped_desc}'")
+                
+                line = f"• {str(mapped_desc or '').strip()} — Monthly Quantity: {str(qty or '').strip()}"
                 # naive wrapping every ~95 chars
                 max_chars = 95
                 chunks = [line[i:i+max_chars] for i in range(0, len(line), max_chars)] if len(line) > max_chars else [line]
@@ -19545,9 +20458,9 @@ class PDFViewer(QMainWindow):
                 log_entry += f"Order #: {display_no}\n"
                 log_entry += f"Prescriber: {prescriber_name or 'N/A'}\n"
                 log_entry += f"Items Requested:\n"
-                for desc, qty in items:
+                for desc, hcpcs, qty in items:
                     if desc:
-                        log_entry += f"  • {desc} (Qty: {qty})\n"
+                        log_entry += f"  • {desc} (HCPCS: {hcpcs or 'N/A'}, Qty: {qty})\n"
                 log_entry += f"File: {out_name}\n"
                 log_entry += "-----------------------------------\n"
                 
@@ -24413,6 +25326,8 @@ class PDFViewer(QMainWindow):
     def process_refill_from_history(self):
         """Create a refill for the selected order in the Patient Order History table."""
         try:
+            from dmelogic.refill_service import process_refill, RefillError
+
             # Use the currently selected row
             row = self.get_selected_history_row()
             if row < 0:
@@ -24492,18 +25407,28 @@ class PDFViewer(QMainWindow):
             if confirm != QMessageBox.StandardButton.Yes:
                 return
 
-            new_order_id = self.create_refill_order(int(src_order_id))
+            folder_path = getattr(self, "folder_path", None)
+            try:
+                new_order = process_refill(int(src_order_id), folder_path=folder_path)
+            except RefillError as e:
+                QMessageBox.critical(self, "Refill Error", f"Cannot process refill:\n\n{e}")
+                return
+            except Exception as e:
+                QMessageBox.critical(self, "Refill Error", f"Failed to process refill:\n\n{e}")
+                return
+
+            new_order_id = new_order.id
+            display_no = self.format_order_number(new_order_id) if hasattr(self, "format_order_number") else str(new_order_id)
 
             # Refresh both orders and patient view
             self.load_orders()
-            # Re-load patient details if still selected
             self.on_patient_selected()
 
             # Offer to open the new refill for edits
             reply = QMessageBox.question(
                 self,
                 "Refill Created",
-                "Refill order created successfully. Open it now for review?",
+                f"Refill order {display_no} created successfully. Open it now for review?",
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
                 QMessageBox.StandardButton.Yes,
             )
@@ -26179,12 +27104,13 @@ class FeeScheduleDialog(QDialog):
                 conn.close()
                 return None
             last_name, first_name, dob = row
-            # Fetch all orders for the same patient
+            # Fetch all orders for the same patient (exclude already-refilled orders)
             cur.execute(
                 """
                 SELECT id, rx_date, order_status, COALESCE(refill_number,0)
                 FROM orders
                 WHERE UPPER(patient_last_name)=UPPER(?) AND UPPER(patient_first_name)=UPPER(?) AND COALESCE(patient_dob,'')=COALESCE(?, '')
+                  AND COALESCE(refill_completed, 0) = 0
                 ORDER BY rx_date ASC, id ASC
                 """,
                 (last_name, first_name, dob),
@@ -26379,9 +27305,9 @@ class FeeScheduleDialog(QDialog):
                 attached_rx,
                 attached_signed,
                 root_id, next_refill,
-                billed,
-                paid,
-                paid_date,
+                0,  # billed - refills start as not billed
+                0,  # paid - refills start as not paid
+                None,  # paid_date - refills have no paid date
                 doctor_directions
             ),
         )
