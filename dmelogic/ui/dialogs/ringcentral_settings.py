@@ -117,16 +117,22 @@ class RingCentralSettingsWidget(QFrame):
         actions_layout = QHBoxLayout()
         
         self.save_btn = QPushButton("Save Credentials")
-        self.save_btn.clicked.connect(self._save_credentials)
+        self.save_btn.clicked.connect(lambda: self._save_credentials(show_confirmation=True))
         actions_layout.addWidget(self.save_btn)
         
         self.connect_btn = QPushButton("Connect")
-        self.connect_btn.setStyleSheet("background-color: #28a745; color: white; font-weight: bold;")
+        self.connect_btn.setStyleSheet(
+            "QPushButton { background-color: #28a745; color: white; font-weight: bold; }"
+            "QPushButton:disabled { background-color: #888; color: #ccc; }"
+        )
         self.connect_btn.clicked.connect(self._connect)
         actions_layout.addWidget(self.connect_btn)
         
         self.disconnect_btn = QPushButton("Disconnect")
-        self.disconnect_btn.setStyleSheet("background-color: #dc3545; color: white;")
+        self.disconnect_btn.setStyleSheet(
+            "QPushButton { background-color: #dc3545; color: white; }"
+            "QPushButton:disabled { background-color: #888; color: #ccc; }"
+        )
         self.disconnect_btn.clicked.connect(self._disconnect)
         actions_layout.addWidget(self.disconnect_btn)
         
@@ -169,8 +175,12 @@ class RingCentralSettingsWidget(QFrame):
         if index >= 0:
             self.server_combo.setCurrentIndex(index)
     
-    def _save_credentials(self):
-        """Save credentials to settings."""
+    def _save_credentials(self, show_confirmation: bool = True):
+        """Save credentials to settings.
+        
+        Args:
+            show_confirmation: Show a message box after saving (False when called from _connect).
+        """
         settings = load_settings()
         
         if 'ringcentral' not in settings:
@@ -187,11 +197,12 @@ class RingCentralSettingsWidget(QFrame):
         # Reset service to pick up new config
         reset_ringcentral_service()
         
-        QMessageBox.information(
-            self,
-            "Saved",
-            "RingCentral credentials saved. Click 'Connect' to authorize."
-        )
+        if show_confirmation:
+            QMessageBox.information(
+                self,
+                "Saved",
+                "RingCentral credentials saved. Click 'Connect' to authorize."
+            )
     
     def _update_connection_status(self):
         """Update the connection status display."""
@@ -227,8 +238,8 @@ class RingCentralSettingsWidget(QFrame):
             )
             return
         
-        # Save credentials
-        self._save_credentials()
+        # Save credentials (silently — no confirmation dialog)
+        self._save_credentials(show_confirmation=False)
         
         # Show progress dialog
         self._progress_dialog = QProgressDialog(
