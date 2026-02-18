@@ -328,6 +328,9 @@ class OrderInput:
     parent_order_id: Optional[int] = None
     refill_number: int = 0
     
+    # Validation overrides
+    skip_icd_validation: bool = False  # Allow creating order without ICD-10 (pended)
+    
     @property
     def patient_full_name(self) -> str:
         """Return formatted patient name."""
@@ -348,7 +351,7 @@ class OrderInput:
             errors.append("Patient first name is required")
         
         # DME-specific: at least one diagnosis code required for insurance
-        if self.billing_type == BillingType.INSURANCE.value:
+        if self.billing_type == BillingType.INSURANCE.value and not self.skip_icd_validation:
             # Check both list and individual fields
             has_icd = bool(self.icd_codes) or any([
                 self.icd_code_1,

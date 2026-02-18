@@ -45,7 +45,7 @@ def fetch_prescriber_by_npi(npi: str, folder_path: Optional[str] = None) -> Opti
     conn.row_factory = sqlite3.Row
     try:
         cur = conn.cursor()
-        cur.execute("SELECT * FROM prescribers WHERE npi = ?", (npi,))
+        cur.execute("SELECT * FROM prescribers WHERE npi_number = ?", (npi,))
         row = cur.fetchone()
         return row
     finally:

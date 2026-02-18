@@ -9,6 +9,14 @@ import subprocess
 from datetime import datetime
 from pathlib import Path
 
+# Fix Unicode output on Windows consoles that default to cp1252
+if sys.stdout and hasattr(sys.stdout, 'reconfigure'):
+    try:
+        sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+        sys.stderr.reconfigure(encoding='utf-8', errors='replace')
+    except Exception:
+        pass
+
 from PyQt6.QtWidgets import QApplication, QMessageBox
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QGuiApplication

@@ -43,6 +43,7 @@ from dmelogic.db import sticky_notes as notes_db
 from dmelogic.ui.notes_board import NotesBoardDialog
 from dmelogic.ui.components.sticky_notes_panel import StickyNotesPanel
 from dmelogic.ui.draggable_button_bar import DraggableButtonBar
+from dmelogic.ui.rx_import_wizard import RxImportWizard
 
 
 def build_orders_tab(self) -> QWidget:
@@ -175,6 +176,9 @@ def build_orders_tab(self) -> QWidget:
     )
     self.btn_link_patient = self.order_button_bar.add_button(
         "link_patient", "🔗 Link to Patient", "Link order to a patient"
+    )
+    self.btn_import_rx = self.order_button_bar.add_button(
+        "import_rx", "📥 Import Rx → Order", "Upload Rx PDF(s) and auto-create an order"
     )
     
     # Restore saved button order if available
@@ -659,6 +663,14 @@ class MainWindow(PDFViewer):
 
         tools_menu.addAction(self.action_sticky_notes)
         
+        # Import Rx → Order
+        tools_menu.addSeparator()
+        self.action_import_rx = QAction("📥 Import Rx → Order", self)
+        self.action_import_rx.setShortcut("Ctrl+I")
+        self.action_import_rx.setToolTip("Upload Rx PDF(s) and auto-create an order")
+        self.action_import_rx.triggered.connect(self._open_rx_import)
+        tools_menu.addAction(self.action_import_rx)
+        
         # User Administration (only visible for users with users.manage permission)
         if has_permission("users.manage"):
             tools_menu.addSeparator()
@@ -781,6 +793,25 @@ class MainWindow(PDFViewer):
         to get the new modern interface instead of the legacy one.
         """
         self.open_order_editor(order_id)
+
+    # -------------------- Rx Import Wizard --------------------
+
+    def _open_rx_import(self) -> None:
+        """Open the Smart Rx Import Wizard — upload Rx PDFs and auto-create orders."""
+        wizard = RxImportWizard(
+            folder_path=getattr(self, "folder_path", None),
+            parent=self,
+        )
+        wizard.order_created.connect(lambda oid: self.load_orders())
+        # Also refresh patient list in case a new patient was added during import
+        wizard.order_created.connect(lambda oid: self.load_patients_table() if hasattr(self, 'load_patients_table') else None)
+        wizard.order_created.connect(lambda oid: self.load_patients() if hasattr(self, 'load_patients') else None)
+
+        # Register as child window if parent supports it
+        if hasattr(self, "register_child_window"):
+            self.register_child_window(wizard)
+
+        wizard.exec()
 
     # -------------------- New Order Wizard --------------------
 
@@ -984,6 +1015,39 @@ class MainWindow(PDFViewer):
                 notes=(result.notes or "").strip() or None,
                 items=order_items,
             )
+
+            # --- Smart Duplicate Detection ---
+            try:
+                from dmelogic.services.duplicate_detector import DuplicateDetector
+                from dmelogic.ui.duplicate_warning_dialog import DuplicateWarningDialog
+
+                detector = DuplicateDetector(folder_path=folder_path)
+                hcpcs_list = [item.hcpcs for item in order_items if item.hcpcs]
+                warnings = detector.check(
+                    patient_last_name=last_name,
+                    patient_first_name=first_name,
+                    patient_dob=(result.patient_dob or "").strip() or None,
+                    patient_id=result.patient_id or None,
+                    hcpcs_codes=hcpcs_list,
+                )
+                if warnings:
+                    action = DuplicateWarningDialog(warnings, parent=self).exec()
+                    if action == DuplicateWarningDialog.ACTION_CANCEL:
+                        return  # User cancelled
+                    elif action == DuplicateWarningDialog.ACTION_VIEW:
+                        # Try to open the existing order
+                        try:
+                            dup_id = warnings[0].order_id
+                            if hasattr(self, "edit_order_by_id"):
+                                self.edit_order_by_id(dup_id)
+                        except Exception:
+                            pass
+                        return
+                    # ACTION_CONTINUE → proceed with creation
+            except ImportError:
+                pass  # Duplicate detector not installed yet
+            except Exception as e:
+                print(f"⚠️ Duplicate detection skipped: {e}")
 
             # Let the DB layer validate and persist
             new_order_id = create_order(order_input, folder_path=folder_path)

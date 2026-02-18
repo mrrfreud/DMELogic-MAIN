@@ -29,6 +29,11 @@ from dmelogic.db.order_workflow import update_order_status_validated
 from dmelogic.db.patients import fetch_patient_by_id
 from dmelogic.db.base import resolve_db_path
 from dmelogic.services.patient_address import get_patient_full_address
+from fee_schedule_enhancements import (
+    add_pa_type_column_to_epaces,
+    add_max_units_column_to_epaces,
+    DbFeeScheduleReader,
+)
 
 
 def _copy(text: str) -> None:
@@ -774,6 +779,14 @@ class EpacesHelperDialog(QDialog):
 
         self._populate_items_table(list(o.items or []))
 
+        # Add fee schedule PA Type + Max Units columns
+        try:
+            _fee_reader = DbFeeScheduleReader(folder_path=self.folder_path)
+            add_pa_type_column_to_epaces(self.items_table, _fee_reader, hcpcs_col=1)
+            add_max_units_column_to_epaces(self.items_table, _fee_reader, hcpcs_col=1, qty_col=2)
+        except Exception as _e:
+            print(f"[ePACES] Fee schedule columns skipped: {_e}")
+
     # ---------- Item rows (buttons above values) ------------------------
 
     def _make_value_cell(self, display: str, tooltip: str, copy_value: str) -> QWidget:
@@ -977,6 +990,8 @@ class EpacesHelperDialog(QDialog):
         self.delivery_date_edit.setDate(QDate(2000, 1, 1))  # Start blank
         self.delivery_date_edit.setMinimumHeight(28)  # Ensure fully visible
         self.delivery_date_edit.setMinimumWidth(120)  # Ensure date fits
+        # Default calendar popup to today when date is blank
+        self.delivery_date_edit.calendarWidget().installEventFilter(self)
         row_delivery.addWidget(QLabel("Delivery Date:"))
         row_delivery.addWidget(self.delivery_date_edit, 2)
 
@@ -992,6 +1007,8 @@ class EpacesHelperDialog(QDialog):
         self.tracking_number_edit.setMinimumHeight(28)  # Ensure fully visible
         self.tracking_number_edit.setMinimumWidth(180)  # Ensure text fits
         self.tracking_number_edit.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        # Auto-fill delivery date and mark shipped when tracking number entered
+        self.tracking_number_edit.textChanged.connect(self._on_tracking_number_changed)
         row_delivery.addSpacing(24)
         row_delivery.addWidget(QLabel("Shipper's Order #:"))
         row_delivery.addWidget(self.tracking_number_edit, 2)
@@ -1004,9 +1021,19 @@ class EpacesHelperDialog(QDialog):
 
         return row_delivery
 
+    def eventFilter(self, obj, event):
+        """Default calendar popup to today's page when delivery date is blank."""
+        from PyQt6.QtCore import QEvent, QDate
+        if event.type() == QEvent.Type.Show:
+            if hasattr(self, 'delivery_date_edit') and obj is self.delivery_date_edit.calendarWidget():
+                if self.delivery_date_edit.date() == self.delivery_date_edit.minimumDate():
+                    today = QDate.currentDate()
+                    obj.setCurrentPage(today.year(), today.month())
+        return super().eventFilter(obj, event)
+
     # ------------------------------------------------------------------ Status action
 
-    def _on_save_delivery_info(self) -> None:
+    def _on_save_delivery_info(self, quiet: bool = False) -> None:
         """Save delivery date and tracking number to order without changing status."""
         from PyQt6.QtWidgets import QMessageBox
         from PyQt6.QtCore import QDate
@@ -1034,18 +1061,20 @@ class EpacesHelperDialog(QDialog):
             self.order.delivery_date = delivery_date
             self.order.tracking_number = tracking_number
             
-            QMessageBox.information(
-                self,
-                "Saved",
-                "Delivery date and tracking number saved successfully.",
-            )
+            if not quiet:
+                QMessageBox.information(
+                    self,
+                    "Saved",
+                    "Delivery date and tracking number saved successfully.",
+                )
             self._refresh_parent_orders()
         except Exception as e:
-            QMessageBox.warning(
-                self,
-                "Save Error",
-                f"Failed to save delivery info: {e}",
-            )
+            if not quiet:
+                QMessageBox.warning(
+                    self,
+                    "Save Error",
+                    f"Failed to save delivery info: {e}",
+                )
 
     def _on_mark_billed(self) -> None:
         """
@@ -1168,10 +1197,41 @@ class EpacesHelperDialog(QDialog):
             return False
 
     def _save_pa_and_close(self) -> None:
-        """Save PA numbers and close the dialog."""
+        """Save delivery info, PA numbers and close the dialog."""
+        self._on_save_delivery_info(quiet=True)
         self._save_pa_numbers()
         self._refresh_parent_orders()
         self.accept()
+
+    def _on_tracking_number_changed(self, text: str) -> None:
+        """Auto-fill delivery date to today and mark as Shipped when a tracking number is entered."""
+        from PyQt6.QtCore import QDate
+        text = text.strip()
+        if text:
+            # Auto-fill delivery date to today if blank
+            current_date = self.delivery_date_edit.date()
+            if not current_date.isValid() or current_date <= self.delivery_date_edit.minimumDate():
+                self.delivery_date_edit.setDate(QDate.currentDate())
+            # Auto-set status text to Shipped (visual indicator)
+            if hasattr(self, '_auto_shipped_done'):
+                return  # Only auto-ship once per session
+            self._auto_shipped_done = True
+            # Silently mark as shipped in DB
+            try:
+                folder = self.folder_path
+                current = self.order.order_status.value
+                new_status = OrderStatus.SHIPPED.value
+                if current != new_status:
+                    success, error = update_order_status_validated(
+                        order_id=self.order.id,
+                        current_status=current,
+                        new_status=new_status,
+                        folder_path=folder,
+                    )
+                    if success:
+                        self.order.order_status = OrderStatus.SHIPPED
+            except Exception:
+                pass  # Non-critical - user can still click Mark as Shipped
 
     def _print_delivery_ticket(self) -> None:
         """Print delivery ticket using ReportLab."""

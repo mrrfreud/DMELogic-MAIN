@@ -40,6 +40,12 @@ from .prescriber_search_dialog import PrescriberSearchDialog
 from dmelogic.db.patients import fetch_patient_insurance, fetch_patient_by_id
 from .inventory_search_dialog import InventorySearchDialog
 from dmelogic.db.inventory import fetch_item_by_code  # auto-fill by HCPCS
+from fee_schedule_enhancements import (
+    setup_wizard_fee_columns,
+    populate_wizard_row_fee_info,
+    validate_qty_vs_max,
+    DbFeeScheduleReader,
+)
 
 
 class LinkOrdersDialog(QDialog):
@@ -296,6 +302,17 @@ class OrderWizard(QDialog):
         self.rx_context = rx_context or {}
         self._result: Optional[OrderWizardResult] = None
         self._items_page_first_visit = True  # Track first entry to Items page
+
+        # Fee schedule reader for Max Units + PA Type columns
+        try:
+            p = parent
+            while p and not hasattr(p, 'fee_reader'):
+                p = p.parent() if hasattr(p, 'parent') and callable(p.parent) else None
+            self._fee_reader = getattr(p, 'fee_reader', None) if p else None
+            if not self._fee_reader:
+                self._fee_reader = DbFeeScheduleReader(folder_path=folder_path)
+        except Exception:
+            self._fee_reader = DbFeeScheduleReader(folder_path=folder_path)
         
         # Refill group linking state
         self._refill_group_id: Optional[int] = None
@@ -1143,6 +1160,12 @@ class OrderWizard(QDialog):
         # React when the HCPCS cell changes
         self.items_table.itemChanged.connect(self._on_item_cell_changed)
 
+        # Add Max Units + PA Type columns from fee schedule
+        try:
+            setup_wizard_fee_columns(self.items_table)
+        except Exception as _e:
+            print(f"⚠️ Fee schedule columns setup skipped: {_e}")
+
         vbox.addWidget(self.items_table, 1)
 
         # --- Buttons row -------------------------------------------------
@@ -1298,6 +1321,24 @@ class OrderWizard(QDialog):
         self.items_table.setCellWidget(row, 8, _make_mod_edit())
         self.items_table.setCellWidget(row, 9, _make_mod_edit())
         self.items_table.setCellWidget(row, 10, _make_mod_edit())
+
+        # Populate Max Units + PA Type from fee schedule (deferred after HCPCS is set)
+        hcpcs_text = self.items_table.item(row, 0)
+        if hcpcs_text and hcpcs_text.text().strip():
+            try:
+                populate_wizard_row_fee_info(
+                    self.items_table, row, hcpcs_text.text().strip(), self._fee_reader
+                )
+            except Exception:
+                pass
+
+        # Wire qty spinbox to validate against max units
+        try:
+            qty.valueChanged.connect(lambda _val, r=row: validate_qty_vs_max(
+                self.items_table, r, self._fee_reader
+            ))
+        except Exception:
+            pass
 
     def _rental_month_for_row(self, row: int) -> int:
         """Determine rental month for a row. TODO: plug real rental logic."""
@@ -1536,7 +1577,23 @@ class OrderWizard(QDialog):
                 if hasattr(self, "doctor_directions_edit"):
                     directions_text = self.doctor_directions_edit.toPlainText().strip()
                 self.items_table.setItem(row, 5, QTableWidgetItem(directions_text))
-                
+
+                # Populate Max Units + PA Type from fee schedule
+                try:
+                    populate_wizard_row_fee_info(
+                        self.items_table, row, str(hcpcs), self._fee_reader
+                    )
+                except Exception:
+                    pass
+
+                # Wire qty spinbox to validate against max units
+                try:
+                    qty.valueChanged.connect(lambda _val, r=row: validate_qty_vs_max(
+                        self.items_table, r, self._fee_reader
+                    ))
+                except Exception:
+                    pass
+
                 # Set focus to quantity field
                 qty.setFocus()
                 qty.selectAll()

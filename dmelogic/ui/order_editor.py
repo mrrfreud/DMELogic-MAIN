@@ -70,6 +70,7 @@ from dmelogic.services.patient_address import get_patient_full_address
 from prescriber_lookup_dialog import PrescriberLookupDialog
 from dmelogic.refill_service import process_refill, RefillError
 from dmelogic.ui.components.sticky_notes_panel import StickyNotesPanel
+from reserved_rx_manager import ReservedRxPanel, handle_last_refill, get_reserved_rx_data
 
 
 class OrderEditorDialog(QDialog):
@@ -226,6 +227,9 @@ class OrderEditorDialog(QDialog):
         
         # Notes Section
         layout.addWidget(self._create_notes_section())
+        
+        # Reserved RX on File Section
+        layout.addWidget(self._create_reserved_rx_section())
         
         layout.addStretch()
         
@@ -467,6 +471,24 @@ class OrderEditorDialog(QDialog):
         
         return group
     
+    def _create_reserved_rx_section(self) -> QGroupBox:
+        """Create Reserved RX on File section."""
+        group = QGroupBox("Reserved RX on File")
+        layout = QVBoxLayout(group)
+        
+        self.rx_panel = ReservedRxPanel(
+            db_path=self.orders_db_path,
+            order_id=str(self.order_id) if self.order_id else None
+        )
+        self.rx_panel.data_changed.connect(self._on_rx_data_changed)
+        layout.addWidget(self.rx_panel)
+        
+        return group
+    
+    def _on_rx_data_changed(self, data: dict):
+        """Handle changes from the Reserved RX panel — enable save button."""
+        self.save_button.setEnabled(True)
+
     def _create_actions_panel(self) -> QWidget:
         """Create right panel with action buttons."""
         panel = QWidget()
@@ -643,6 +665,10 @@ class OrderEditorDialog(QDialog):
         # Update header
         self.order_id_label.setText(f"Order #: {self._format_order_number(self.order)}")
         self._update_status_badge()
+        
+        # Load Reserved RX panel data
+        if hasattr(self, 'rx_panel'):
+            self.rx_panel.load(str(self.order.id))
         
         # Patient section - use legacy flat fields (from orders table)
         self.patient_name.setText(self.order.patient_full_name or "N/A")
@@ -1768,6 +1794,30 @@ class OrderEditorDialog(QDialog):
             
             # Refresh the current order to show locked status
             self._load_order()
+
+            # Check reserved RX / last refill warning for source order
+            try:
+                min_refills = 999
+                for item in refill_order.items:
+                    try:
+                        r = int(item.refills) if item.refills is not None else 0
+                    except (ValueError, TypeError):
+                        r = 0
+                    min_refills = min(min_refills, r)
+                if min_refills == 999:
+                    min_refills = 0
+                patient_name = self.order.patient_full_name or "Unknown"
+                handle_last_refill(
+                    parent_widget=self,
+                    db_path=self.orders_db_path,
+                    order_id=str(self.order.id),
+                    patient_name=patient_name,
+                    refills_remaining=min_refills,
+                    on_create_order_callback=None,
+                    on_fax_md_callback=None
+                )
+            except Exception as rx_err:
+                print(f"[ReservedRX] handle_last_refill error in editor: {rx_err}")
             
         except RefillError as e:
             QMessageBox.critical(
@@ -2623,6 +2673,10 @@ class OrderEditorDialog(QDialog):
                 new_icd_list = [f.text().strip().upper() for f in self.icd_code_fields if f.text().strip()]
                 self.order.icd_codes = new_icd_list
             
+            # Save Reserved RX panel data
+            if hasattr(self, 'rx_panel'):
+                self.rx_panel.save()
+
             QMessageBox.information(
                 self,
                 "Changes Saved",

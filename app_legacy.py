@@ -35,7 +35,7 @@ from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QH
                              QSizePolicy, QDialogButtonBox, QAbstractItemView,
                              QStyleOptionViewItem, QInputDialog, QMenu)
 from PyQt6.QtGui import QPixmap, QImage, QAction, QPalette, QColor, QFont, QPainter, QPen, QBrush, QPolygon
-from PyQt6.QtCore import Qt, QTimer, QThread, pyqtSignal, QTime, QDateTime, QRect, QRectF, QDate, QPoint, QSize, pyqtProperty, QPropertyAnimation, QEasingCurve, QObject
+from PyQt6.QtCore import Qt, QTimer, QThread, pyqtSignal, QTime, QDateTime, QRect, QRectF, QDate, QPoint, QSize, pyqtProperty, QPropertyAnimation, QEasingCurve, QObject, QEvent
 from PyQt6.QtPrintSupport import QPrinter, QPrintDialog
 import subprocess
 import glob
@@ -2230,6 +2230,8 @@ class NewOrderDialog(QDialog):
         self.delivery_date_edit.setMinimumWidth(120)
         self.delivery_date_edit.setSpecialValueText(" ")  # Allow clearing the date
         self.delivery_date_edit.setDate(QDate(2000, 1, 1))  # Set to minimum date (displays as blank)
+        # Default calendar popup to today when date is blank
+        self.delivery_date_edit.calendarWidget().installEventFilter(self)
         # Add a small clear button next to the date field
         self.clear_delivery_btn = QPushButton("Clear")
         self.clear_delivery_btn.setToolTip("Clear Delivery/Pickup Date")
@@ -2302,6 +2304,8 @@ class NewOrderDialog(QDialog):
         self.paid_date_edit.setMinimumDate(QDate(2000, 1, 1))
         self.paid_date_edit.setSpecialValueText(" ")  # Allow clearing the date
         self.paid_date_edit.setDate(QDate(2000, 1, 1))  # Set to minimum date (displays as blank)
+        # Default calendar popup to today when date is blank
+        self.paid_date_edit.calendarWidget().installEventFilter(self)
         self.paid_date_edit.setMinimumWidth(150)
         self.clear_paid_btn = QPushButton("Clear")
         self.clear_paid_btn.setToolTip("Clear Paid Date")
@@ -2911,6 +2915,18 @@ class NewOrderDialog(QDialog):
         
         outer_layout.addLayout(button_layout)
 
+    def eventFilter(self, obj, event):
+        """Default calendar popups to today's page when the current date is blank (minimum)."""
+        if event.type() == QEvent.Type.Show:
+            for date_edit in (getattr(self, 'delivery_date_edit', None),
+                              getattr(self, 'paid_date_edit', None)):
+                if date_edit is not None and obj is date_edit.calendarWidget():
+                    if date_edit.date() == date_edit.minimumDate():
+                        today = QDate.currentDate()
+                        obj.setCurrentPage(today.year(), today.month())
+                    break
+        return super().eventFilter(obj, event)
+
     def clear_delivery_date_field(self):
         """Clear the Delivery/Pickup date in the Edit/New Order dialog.
         Uses the field's minimum date (blank display via SpecialValueText).
@@ -3247,10 +3263,10 @@ class NewOrderDialog(QDialog):
                         d = self.parent.orders_table.item(r, 0)
                         if d and d.text() == order_num:
                             # Set Paid Date cell first to avoid prompt in parent handler
-                            pd_item = self.parent.orders_table.item(r, 15)
+                            pd_item = self.parent.orders_table.item(r, 14)
                             if pd_item is None:
                                 pd_item = QTableWidgetItem("")
-                                self.parent.orders_table.setItem(r, 15, pd_item)
+                                self.parent.orders_table.setItem(r, 14, pd_item)
                             # Format date as yyyy-MM-dd to match parent expectations
                             qd = self.paid_date_edit.date()
                             date_str = qd.toString("yyyy-MM-dd") if qd and qd.isValid() else ""
@@ -3261,10 +3277,10 @@ class NewOrderDialog(QDialog):
                     for r in range(self.parent.orders_table.rowCount()):
                         d = self.parent.orders_table.item(r, 0)
                         if d and d.text() == order_num:
-                            it = self.parent.orders_table.item(r, 14)
+                            it = self.parent.orders_table.item(r, 13)
                             if it is None:
                                 it = QTableWidgetItem("No")
-                                self.parent.orders_table.setItem(r, 14, it)
+                                self.parent.orders_table.setItem(r, 13, it)
                             it.setText("Yes")
                             break
                 except Exception:
@@ -9482,6 +9498,14 @@ class PDFViewer(QMainWindow):
         # Track highlighted files for persistent highlighting
         self.highlighted_files = set()
         
+        # Shared fee schedule reader (DB-backed) for wizard + ePACES enhancements
+        try:
+            from fee_schedule_enhancements import DbFeeScheduleReader
+            self.fee_reader = DbFeeScheduleReader(folder_path=self.folder_path)
+        except Exception as _e:
+            print(f"⚠️ Fee schedule reader init skipped: {_e}")
+            self.fee_reader = None
+
         # Cache for parsed filename data
         self.filename_cache = {}
 
@@ -14724,7 +14748,7 @@ class PDFViewer(QMainWindow):
         columns = [
             "Order #", "Patient", "HCPCS", "Item #", "Description",
             "Qty Disp.", "Refills", "Days", "Order Date",
-            "Refill Due Date", "Delivery Date", "Pickup Date", "Status", "Tracking #", "Notes", "Paid", "Paid Date"
+            "Refill Due Date", "Del/PU Date", "Status", "Tracking #", "Notes", "Paid", "Paid Date"
         ]
         self.orders_table.setColumnCount(len(columns))
         self.orders_table.setHorizontalHeaderLabels(columns)
@@ -14761,7 +14785,7 @@ class PDFViewer(QMainWindow):
         # Use Yes/No dropdown for Paid column (now at index 15)
         try:
             self._orders_yesno_delegate = YesNoDelegate(self.orders_table)
-            self.orders_table.setItemDelegateForColumn(15, self._orders_yesno_delegate)
+            self.orders_table.setItemDelegateForColumn(14, self._orders_yesno_delegate)
         except Exception:
             pass
         
@@ -14798,6 +14822,8 @@ class PDFViewer(QMainWindow):
         self.btn_print_1500.clicked.connect(self.print_1500_for_selected_order)
         self.btn_delete_order.clicked.connect(self.delete_order)
         self.btn_link_patient.clicked.connect(self.show_link_order_dialog)
+        if hasattr(self, "btn_import_rx"):
+            self.btn_import_rx.clicked.connect(self._open_rx_import)
         
         # Connect table selection to update summary
         self.orders_table.selectionModel().currentRowChanged.connect(
@@ -15450,7 +15476,7 @@ class PDFViewer(QMainWindow):
             # Get data from the selected row
             patient_item = self.orders_table.item(row_index, 1)  # Patient column
             order_item = self.orders_table.item(row_index, 0)    # Order # column
-            status_item = self.orders_table.item(row_index, 12)  # Status column
+            status_item = self.orders_table.item(row_index, 11)  # Status column
             date_item = self.orders_table.item(row_index, 9)     # Order Date column
             
             patient_name = patient_item.text() if patient_item else "Unknown"
@@ -15644,8 +15670,12 @@ class PDFViewer(QMainWindow):
                         patient_display = f"  └─"  # Visual connector
                     
                     order_date_display = (order_date or "") if idx == 0 else ""
-                    delivery_display = (delivery_date or "") if idx == 0 else ""
-                    pickup_date_display = pickup_display if idx == 0 else ""
+                    # Merged Del/PU Date: prefer pickup_date for pickups, else delivery_date
+                    del_pu_raw = pickup_date or delivery_date or ""
+                    try:
+                        del_pu_display = (self.format_date_display(del_pu_raw) if del_pu_raw else "") if idx == 0 else ""
+                    except Exception:
+                        del_pu_display = (del_pu_raw or "") if idx == 0 else ""
                     tracking_display = (tracking_number or "") if idx == 0 else ""
                     notes_display = (notes or "") if idx == 0 else ""
                     paid_display = ("Yes" if (is_paid or 0) else "No") if idx == 0 else ""
@@ -15770,13 +15800,25 @@ class PDFViewer(QMainWindow):
                         font.setItalic(True)
                         due_item.setFont(font)
 
-                    self.orders_table.setItem(row, 8, QTableWidgetItem(order_date_display))  # Order Date
+                    # Format order date for display
+                    try:
+                        order_date_formatted = self.format_date_display(order_date_display) if order_date_display else ""
+                    except Exception:
+                        order_date_formatted = order_date_display
+                    self.orders_table.setItem(row, 8, QTableWidgetItem(order_date_formatted))  # Order Date
                     self.orders_table.setItem(row, 9, due_item)  # Refill Due Date
-                    self.orders_table.setItem(row, 10, QTableWidgetItem(delivery_display))
-                    self.orders_table.setItem(row, 11, QTableWidgetItem(pickup_date_display))
+                    self.orders_table.setItem(row, 10, QTableWidgetItem(del_pu_display))  # Del/PU Date
                     
                     # Status - show only on first row
                     if idx == 0:
+                        # Add RX on file badge to status display
+                        try:
+                            rx_on_file_val = order.get("rx_on_file", 0) or 0
+                            if int(rx_on_file_val):
+                                status_display = f"📋 RX | {status_display}"
+                        except Exception:
+                            pass
+
                         status_item = QTableWidgetItem(status_display)
 
                         # Calmer, semantic tints using the shared palette
@@ -15806,27 +15848,36 @@ class PDFViewer(QMainWindow):
                             # Neutral pending/other
                             status_item.setBackground(QColor(148, 163, 184, 35))
 
-                        self.orders_table.setItem(row, 12, status_item)
+                        self.orders_table.setItem(row, 11, status_item)
                     else:
-                        self.orders_table.setItem(row, 12, QTableWidgetItem(""))
+                        self.orders_table.setItem(row, 11, QTableWidgetItem(""))
                     
-                    self.orders_table.setItem(row, 13, QTableWidgetItem(tracking_display))
-                    self.orders_table.setItem(row, 14, QTableWidgetItem(notes_display))
+                    tracking_item = QTableWidgetItem(tracking_display)
+                    tracking_item.setFlags(tracking_item.flags() | Qt.ItemFlag.ItemIsEditable)
+                    self.orders_table.setItem(row, 12, tracking_item)
+
+                    notes_item = QTableWidgetItem(notes_display)
+                    notes_item.setFlags(notes_item.flags() | Qt.ItemFlag.ItemIsEditable)
+                    self.orders_table.setItem(row, 13, notes_item)
 
                     # Paid status - show only on first row
                     if idx == 0:
                         paid_item = QTableWidgetItem(paid_display)
                         paid_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-                        self.orders_table.setItem(row, 15, paid_item)
+                        self.orders_table.setItem(row, 14, paid_item)
                         
                         # Paid Date
-                        paid_date_item = QTableWidgetItem(paid_date_display)
+                        try:
+                            paid_date_formatted = self.format_date_display(paid_date_display) if paid_date_display else ""
+                        except Exception:
+                            paid_date_formatted = paid_date_display
+                        paid_date_item = QTableWidgetItem(paid_date_formatted)
                         if is_paid and paid_date:
                             paid_date_item.setBackground(QColor("#d6eaf8"))  # Light blue
-                        self.orders_table.setItem(row, 16, paid_date_item)
+                        self.orders_table.setItem(row, 15, paid_date_item)
                     else:
+                        self.orders_table.setItem(row, 14, QTableWidgetItem(""))
                         self.orders_table.setItem(row, 15, QTableWidgetItem(""))
-                        self.orders_table.setItem(row, 16, QTableWidgetItem(""))
                     
                     # Row-level neon highlighting removed; rely on status cell + due date tints
             
@@ -16052,9 +16103,9 @@ class PDFViewer(QMainWindow):
                     else:
                         matches_search = False
             
-            # Filter by Status (column 12)
+            # Filter by Status (column 11)
             if matches_search and status_filter != "All statuses":
-                status_item = self.orders_table.item(row, 12)
+                status_item = self.orders_table.item(row, 11)
                 status_text = status_item.text() if status_item else ""
                 if status_filter.lower() not in status_text.lower():
                     matches_search = False
@@ -17057,7 +17108,21 @@ class PDFViewer(QMainWindow):
             print(f"Error showing low stock items: {e}")
 
     def create_process_refills_tab(self):
-        """Create the Process Refills tab for tracking due refills"""
+        """Create the Process Refills tab — enhanced Refill Automation Queue."""
+        try:
+            from dmelogic.ui.refill_queue import RefillQueueWidget
+            self.refill_queue = RefillQueueWidget(
+                orders_db_file=getattr(self, 'orders_database_file', None),
+                folder_path=getattr(self, 'folder_path', None),
+                parent=self,
+            )
+            self.refill_queue.refill_processed.connect(lambda: self.load_orders())
+            self.main_tabs.addTab(self.refill_queue, "💊 Refill Queue")
+            return
+        except Exception as e:
+            print(f"⚠️ Failed to load RefillQueueWidget, falling back to legacy: {e}")
+
+        # === LEGACY FALLBACK (original code) ===
         refills_tab = QWidget()
         layout = QVBoxLayout(refills_tab)
         
@@ -22326,6 +22391,13 @@ class PDFViewer(QMainWindow):
         conn.commit()
         conn.close()
         print(f"✅ Orders database initialized: {self.orders_database_file}")
+
+        # Run Reserved RX columns migration
+        try:
+            from reserved_rx_manager import migrate_reserved_rx_columns
+            migrate_reserved_rx_columns(self.orders_database_file)
+        except Exception as e:
+            print(f"⚠️ Reserved RX migration skipped: {e}")
 
     def setup_prescriber_database(self):
         """Creates the prescriber database and tables if they don't exist."""
@@ -28043,6 +28115,9 @@ class PDFViewer(QMainWindow):
                 diff_btn = msg_box.addButton("Send to Different Number", QMessageBox.ButtonRole.ActionRole)
                 skip_btn = msg_box.addButton("Don't Send", QMessageBox.ButtonRole.RejectRole)
                 msg_box.setDefaultButton(send_btn)
+                msg_box.setWindowFlags(msg_box.windowFlags() | Qt.WindowType.WindowStaysOnTopHint)
+                msg_box.raise_()
+                msg_box.activateWindow()
                 msg_box.exec()
                 
                 clicked = msg_box.clickedButton()
@@ -30092,6 +30167,13 @@ class PDFViewer(QMainWindow):
                 except Exception:
                     pass
             self.refresh_fee_schedule()
+
+            # Keep shared fee_reader in sync after re-import
+            try:
+                if hasattr(self, 'fee_reader') and self.fee_reader:
+                    self.fee_reader.reload(folder_path=self.folder_path)
+            except Exception:
+                pass
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Failed to select fee schedule file: {e}")
 
@@ -32819,7 +32901,34 @@ class PDFViewer(QMainWindow):
 
             # After handling the order review, check if we should prompt for refill request
             if items_with_zero_refills:
-                self._prompt_for_refill_request_after_processing(new_order_id, items_with_zero_refills)
+                # First check Reserved RX on the source order
+                try:
+                    from reserved_rx_manager import handle_last_refill
+                    # Get the min refills remaining across all items in the new order
+                    min_refills = 999
+                    for item in new_order.items:
+                        try:
+                            r = int(item.refills) if item.refills is not None else 0
+                        except (ValueError, TypeError):
+                            r = 0
+                        min_refills = min(min_refills, r)
+                    if min_refills == 999:
+                        min_refills = 0
+                    # Get patient name for dialog
+                    patient_text = self.orders_table.item(row, 1).text() if self.orders_table.item(row, 1) else ""
+                    handle_last_refill(
+                        parent_widget=self,
+                        db_path=self.orders_db_path,
+                        order_id=str(chosen_order_id),
+                        patient_name=patient_text,
+                        refills_remaining=min_refills,
+                        on_create_order_callback=None,
+                        on_fax_md_callback=lambda: self.create_refill_request_for_order(new_order_id)
+                    )
+                except Exception as rx_err:
+                    print(f"[ReservedRX] handle_last_refill error: {rx_err}")
+                    # Fallback to original prompt
+                    self._prompt_for_refill_request_after_processing(new_order_id, items_with_zero_refills)
 
         except Exception as e:
             QMessageBox.critical(self, "Refill Error", f"Failed to process refill: {e}")
@@ -35168,21 +35277,21 @@ class PDFViewer(QMainWindow):
     def handle_cell_click(self, row, col):
         """Handle inline interactions for specific columns.
 
-        - 15: Paid — single-click toggles between Yes/No (fast UX)
-        - 10: Delivery Date — open date picker
-        - 16: Paid Date — open date picker
+        - 14: Paid — single-click toggles between Yes/No (fast UX)
+        - 10: Del/PU Date — open date picker
+        - 15: Paid Date — open date picker
         """
         # Fast toggle for Paid column
-        if col == 15:
+        if col == 14:
             try:
-                paid_item = self.orders_table.item(row, 15)
+                paid_item = self.orders_table.item(row, 14)
                 current_text = (paid_item.text() if paid_item else "").strip().lower()
                 new_text = "No" if current_text == "yes" else "Yes"
                 # Setting text will trigger on_orders_item_changed to persist
                 if paid_item is None:
                     paid_item = QTableWidgetItem(new_text)
                     paid_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-                    self.orders_table.setItem(row, 15, paid_item)
+                    self.orders_table.setItem(row, 14, paid_item)
                 else:
                     paid_item.setText(new_text)
                 # Visual nudge (optional refresh)
@@ -35192,7 +35301,7 @@ class PDFViewer(QMainWindow):
             return
 
         # Gate for supported date columns
-        if col not in [10, 16]:
+        if col not in [10, 15]:
             return
         
         # Get order ID
@@ -35205,23 +35314,25 @@ class PDFViewer(QMainWindow):
             conn = sqlite3.connect(self.orders_db_path)
             cursor = conn.cursor()
             
-            if col == 10:  # Delivery Date column: open date picker
+            if col == 10:  # Del/PU Date column: open date picker
                 current_date = self.orders_table.item(row, 10).text() if self.orders_table.item(row, 10) else ""
                 dialog = QDialog(self)
-                dialog.setWindowTitle("Set Delivery Date")
+                dialog.setWindowTitle("Set Delivery/Pickup Date")
                 v = QVBoxLayout(dialog)
                 date_edit = QDateEdit()
                 date_edit.setCalendarPopup(True)
-                date_edit.setDisplayFormat("yyyy-MM-dd")
+                date_edit.setDisplayFormat("MM/dd/yyyy")
                 if current_date:
-                    d = QDate.fromString(current_date, "yyyy-MM-dd")
+                    d = QDate.fromString(current_date, "MM/dd/yyyy")
+                    if not d.isValid():
+                        d = QDate.fromString(current_date, "yyyy-MM-dd")
                     if d.isValid():
                         date_edit.setDate(d)
                     else:
                         date_edit.setDate(QDate.currentDate())
                 else:
                     date_edit.setDate(QDate.currentDate())
-                v.addWidget(QLabel("Select Delivery Date:"))
+                v.addWidget(QLabel("Select Delivery/Pickup Date:"))
                 v.addWidget(date_edit)
                 h = QHBoxLayout()
                 save_btn = QPushButton("Save")
@@ -35233,10 +35344,11 @@ class PDFViewer(QMainWindow):
                 v.addLayout(h)
 
                 def save_delivery():
-                    nd = date_edit.date().toString("yyyy-MM-dd")
-                    cursor.execute("UPDATE orders SET delivery_date = ? WHERE id = ?", (nd, order_id))
+                    nd_iso = date_edit.date().toString("yyyy-MM-dd")
+                    nd_display = date_edit.date().toString("MM/dd/yyyy")
+                    cursor.execute("UPDATE orders SET delivery_date = ? WHERE id = ?", (nd_iso, order_id))
                     conn.commit()
-                    self.orders_table.setItem(row, 10, QTableWidgetItem(nd))
+                    self.orders_table.setItem(row, 10, QTableWidgetItem(nd_display))
                     dialog.accept()
                 def clear_delivery():
                     cursor.execute("UPDATE orders SET delivery_date = NULL WHERE id = ?", (order_id,))
@@ -35248,18 +35360,21 @@ class PDFViewer(QMainWindow):
                 cancel_btn.clicked.connect(dialog.reject)
                 dialog.exec()
 
-            elif col == 16:  # Paid Date column
+            elif col == 15:  # Paid Date column
                 # Open date picker
-                current_date = self.orders_table.item(row, 16).text()
+                current_date = self.orders_table.item(row, 15).text()
                 date_dialog = QDialog(self)
                 date_dialog.setWindowTitle("Set Paid Date")
                 layout = QVBoxLayout(date_dialog)
                 
                 date_edit = QDateEdit()
                 date_edit.setCalendarPopup(True)
-                date_edit.setDisplayFormat("yyyy-MM-dd")
+                date_edit.setDisplayFormat("MM/dd/yyyy")
                 if current_date:
-                    date_edit.setDate(QDate.fromString(current_date, "yyyy-MM-dd"))
+                    d = QDate.fromString(current_date, "MM/dd/yyyy")
+                    if not d.isValid():
+                        d = QDate.fromString(current_date, "yyyy-MM-dd")
+                    date_edit.setDate(d if d.isValid() else QDate.currentDate())
                 else:
                     date_edit.setDate(QDate.currentDate())
                 
@@ -35276,20 +35391,21 @@ class PDFViewer(QMainWindow):
                 layout.addLayout(btn_layout)
                 
                 def save_date():
-                    new_date = date_edit.date().toString("yyyy-MM-dd")
-                    cursor.execute("UPDATE orders SET paid_date = ? WHERE id = ?", (new_date, order_id))
+                    new_date_iso = date_edit.date().toString("yyyy-MM-dd")
+                    new_date_display = date_edit.date().toString("MM/dd/yyyy")
+                    cursor.execute("UPDATE orders SET paid_date = ? WHERE id = ?", (new_date_iso, order_id))
                     conn.commit()
                     
-                    paid_date_item = QTableWidgetItem(new_date)
+                    paid_date_item = QTableWidgetItem(new_date_display)
                     paid_date_item.setBackground(QColor("#d6eaf8"))
-                    self.orders_table.setItem(row, 16, paid_date_item)
+                    self.orders_table.setItem(row, 15, paid_date_item)
                     date_dialog.accept()
                 
                 def clear_date():
                     cursor.execute("UPDATE orders SET paid_date = NULL WHERE id = ?", (order_id,))
                     conn.commit()
                     
-                    self.orders_table.setItem(row, 16, QTableWidgetItem(""))
+                    self.orders_table.setItem(row, 15, QTableWidgetItem(""))
                     date_dialog.accept()
                 
                 save_btn.clicked.connect(save_date)
@@ -37199,8 +37315,8 @@ class FeeScheduleDialog(QDialog):
         try:
             if not index or not index.isValid():
                 return
-            if index.column() == 15:
-                # Ignore double-clicks on Paid column to avoid interrupting inline toggle
+            if index.column() in (10, 12, 13, 14):
+                # Ignore double-clicks on Del/PU Date, Tracking #, Notes, Paid columns to allow inline editing
                 return
             
             # Check if this order already has a window open
@@ -37246,15 +37362,36 @@ class FeeScheduleDialog(QDialog):
             print(f"on_orders_double_clicked error: {e}")
 
     def on_orders_item_changed(self, item: QTableWidgetItem):
-        """Persist edits for Paid (col 15) using Yes/No selector.
-
-        When marking as Paid, require a Paid Date and prompt to set it to today if missing.
-        """
+        """Persist inline edits for Tracking # (col 12), Notes (col 13), and Paid (col 14)."""
         try:
             # Avoid processing while loading
             if getattr(self, '_orders_updating', False):
                 return
-            if item.column() != 15:
+
+            col = item.column()
+
+            # Handle Tracking # (col 12) and Notes (col 13) inline edits
+            if col in (12, 13):
+                row = item.row()
+                order_number = self.orders_table.item(row, 0).text() if self.orders_table.item(row, 0) else ""
+                order_id = int(self.get_order_id_from_display(order_number) or 0)
+                if not order_id:
+                    return
+                new_text = (item.text() or "").strip()
+                try:
+                    conn = sqlite3.connect(self.orders_db_path)
+                    cur = conn.cursor()
+                    if col == 12:
+                        cur.execute("UPDATE orders SET tracking_number = ? WHERE id = ?", (new_text, order_id))
+                    else:
+                        cur.execute("UPDATE orders SET notes = ? WHERE id = ?", (new_text, order_id))
+                    conn.commit()
+                    conn.close()
+                except Exception as e:
+                    print(f"Error saving {'tracking' if col == 12 else 'notes'}: {e}")
+                return
+
+            if col != 14:
                 return
 
             row = item.row()
@@ -37265,13 +37402,13 @@ class FeeScheduleDialog(QDialog):
 
             conn = sqlite3.connect(self.orders_db_path)
             cur = conn.cursor()
-            # Paid column (now at 15) — text 'Yes'/'No'
+            # Paid column (now at 14) — text 'Yes'/'No'
             text = (item.text() or "").strip().lower()
             val = 1 if text in ("yes", "1", "true") else 0
             cur.execute("UPDATE orders SET paid = ? WHERE id = ?", (val, order_id))
             if val == 1:
                 # Ensure paid_date is present; if not, prompt and set to today
-                paid_date_item = self.orders_table.item(row, 16)
+                paid_date_item = self.orders_table.item(row, 15)
                 current_pd = paid_date_item.text() if paid_date_item else ""
                 if not current_pd:
                     reply = QMessageBox.question(
@@ -37283,11 +37420,12 @@ class FeeScheduleDialog(QDialog):
                     )
                     if reply == QMessageBox.StandardButton.Yes:
                         today_iso = QDate.currentDate().toString("yyyy-MM-dd")
+                        today_display = QDate.currentDate().toString("MM/dd/yyyy")
                         cur.execute("UPDATE orders SET paid_date = ? WHERE id = ?", (today_iso, order_id))
                         # Update table cell
-                        pdi = QTableWidgetItem(today_iso)
+                        pdi = QTableWidgetItem(today_display)
                         pdi.setBackground(QColor("#d6eaf8"))
-                        self.orders_table.setItem(row, 16, pdi)
+                        self.orders_table.setItem(row, 15, pdi)
                     else:
                         # Revert selection to 'No'
                         try:
