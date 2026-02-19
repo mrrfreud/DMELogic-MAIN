@@ -9595,40 +9595,9 @@ class PDFViewer(QMainWindow):
         self.setCentralWidget(self.central_widget)
         self.main_layout = QVBoxLayout(self.central_widget)
         
-        # Create main tab widget
+        # Create main tab widget — horizontal top navigation
         self.main_tabs = QTabWidget()
-        self.main_tabs.setStyleSheet("""
-            QTabWidget::pane {
-                border: 1px solid #424242;
-                background-color: #2B2B2B;
-            }
-            QTabWidget::tab-bar {
-                alignment: left;
-            }
-            QTabBar::tab {
-                background-color: #3C3C3C;
-                color: white;
-                padding: 8px 16px;
-                margin-right: 2px;
-                border-top-left-radius: 4px;
-                border-top-right-radius: 4px;
-            }
-            QTabBar::tab:selected {
-                background-color: #0078D4;
-            }
-            QTabBar::tab:hover {
-                background-color: #505050;
-            }
-            QLabel {
-                color: #ffffff;
-            }
-            QGroupBox {
-                color: #ffffff;
-            }
-            QGroupBox::title {
-                color: #ffffff;
-            }
-        """)
+        self.main_tabs.setDocumentMode(True)
         
         # Create individual tabs (Dashboard first as home screen)
         self.create_dashboard_tab()
@@ -14793,7 +14762,6 @@ class PDFViewer(QMainWindow):
         orders_tab = build_orders_tab(self)
         
         # Wire up all the action buttons to existing handlers
-        # New Order button hidden/disabled; keep disconnected
         if hasattr(self, 'btn_new_order'):
             try:
                 self.btn_new_order.clicked.disconnect()
@@ -14808,13 +14776,10 @@ class PDFViewer(QMainWindow):
             self.btn_reverse_refill.clicked.connect(self.reverse_refill_order)
         if hasattr(self, "btn_refill_request"):
             self.btn_refill_request.clicked.connect(lambda: self.create_refill_request_for_order())
-        
-        # Batch operation buttons
         if hasattr(self, "btn_batch_delivered"):
             self.btn_batch_delivered.clicked.connect(self.batch_mark_delivered)
         if hasattr(self, "btn_batch_billed"):
             self.btn_batch_billed.clicked.connect(self.batch_mark_billed)
-        
         self.btn_export_portal.clicked.connect(self.export_order_to_state_portal)
         self.btn_epaces.clicked.connect(self.open_epaces_helper)
         self.btn_print_delivery_ticket.clicked.connect(self.print_delivery_ticket_for_selected_order)
@@ -15466,29 +15431,47 @@ class PDFViewer(QMainWindow):
             pass
 
     def on_order_selected(self, row_index):
-        """Update summary label when an order is selected"""
+        """Update summary label when an order is selected."""
         if row_index < 0 or row_index >= self.orders_table.rowCount():
-            self.orders_summary_label.setText("No order selected")
-            self.orders_sub_label.setText("")
+            if hasattr(self, 'orders_summary_label'):
+                self.orders_summary_label.setText("No order selected")
+            if hasattr(self, 'orders_sub_label'):
+                self.orders_sub_label.setText("Click an order to select it and use the action buttons →")
             return
-        
+
         try:
-            # Get data from the selected row
-            patient_item = self.orders_table.item(row_index, 1)  # Patient column
-            order_item = self.orders_table.item(row_index, 0)    # Order # column
-            status_item = self.orders_table.item(row_index, 11)  # Status column
-            date_item = self.orders_table.item(row_index, 9)     # Order Date column
-            
-            patient_name = patient_item.text() if patient_item else "Unknown"
-            order_number = order_item.text() if order_item else "N/A"
-            status = status_item.text() if status_item else "Unknown"
-            created = date_item.text() if date_item else "N/A"
-            
-            self.orders_summary_label.setText(f"{order_number} — {patient_name}")
-            self.orders_sub_label.setText(f"Status: {status} • Created: {created}")
+            patient_item = self.orders_table.item(row_index, 1)
+            order_item   = self.orders_table.item(row_index, 0)
+            status_item  = self.orders_table.item(row_index, 11)
+            date_item    = self.orders_table.item(row_index, 8)
+
+            patient_name  = patient_item.text() if patient_item else "Unknown"
+            order_number  = order_item.text()   if order_item   else "N/A"
+            status        = status_item.text()  if status_item  else "—"
+            order_date    = date_item.text()    if date_item    else "—"
+
+            # Skip continuation rows (↳ prefix)
+            if order_number.strip().startswith("↳") or patient_name.strip().startswith("└"):
+                for r in range(row_index - 1, -1, -1):
+                    oi = self.orders_table.item(r, 0)
+                    if oi and not oi.text().strip().startswith("↳"):
+                        patient_item  = self.orders_table.item(r, 1)
+                        status_item   = self.orders_table.item(r, 11)
+                        date_item     = self.orders_table.item(r, 8)
+                        order_number  = oi.text()
+                        patient_name  = patient_item.text() if patient_item else "Unknown"
+                        status        = status_item.text()  if status_item  else "—"
+                        order_date    = date_item.text()    if date_item    else "—"
+                        break
+
+            if hasattr(self, 'orders_summary_label'):
+                self.orders_summary_label.setText(f"{order_number}  —  {patient_name}")
+            if hasattr(self, 'orders_sub_label'):
+                self.orders_sub_label.setText(f"Status: {status}   •   Order Date: {order_date}")
+
         except Exception as e:
-            self.orders_summary_label.setText("Error loading order details")
-            self.orders_sub_label.setText("")
+            if hasattr(self, 'orders_summary_label'):
+                self.orders_summary_label.setText("Error reading order")
 
     def load_orders(self):
         """Load orders from database into the orders table - ONE ROW PER ITEM."""
@@ -15703,7 +15686,26 @@ class PDFViewer(QMainWindow):
                     
                     self.orders_table.setItem(row, 0, order_item)
                     self.orders_table.setItem(row, 1, patient_item)
-                    self.orders_table.setItem(row, 2, QTableWidgetItem(item_hcpcs or ""))
+
+                    # ── HCPCS colored item (no widget — avoids ghost-text) ──
+                    _hcpcs_item = QTableWidgetItem(item_hcpcs if (item_hcpcs and idx == 0) else "")
+                    if item_hcpcs and idx == 0:
+                        _hcpcs_fg, _hcpcs_bg = {
+                            'A': (QColor('#14b8a6'), QColor(20,  184, 166, 40)),
+                            'T': (QColor('#a855f7'), QColor(168,  85, 247, 40)),
+                            'E': (QColor('#3b82f6'), QColor( 59, 130, 246, 40)),
+                            'K': (QColor('#f97316'), QColor(249, 115,  22, 40)),
+                            'L': (QColor('#22c55e'), QColor( 34, 197,  94, 40)),
+                        }.get((item_hcpcs[:1]).upper(), (QColor('#3b82f6'), QColor(59, 130, 246, 40)))
+                        _hcpcs_item.setForeground(_hcpcs_fg)
+                        _hcpcs_item.setBackground(_hcpcs_bg)
+                        _font = _hcpcs_item.font()
+                        _font.setFamily("Consolas")
+                        _font.setWeight(QFont.Weight.Bold)
+                        _hcpcs_item.setFont(_font)
+                        _hcpcs_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter | Qt.AlignmentFlag.AlignVCenter)
+                    self.orders_table.setItem(row, 2, _hcpcs_item)
+
                     self.orders_table.setItem(row, 3, QTableWidgetItem(item_number or ""))
                     self.orders_table.setItem(row, 4, QTableWidgetItem(item_desc or ""))
                     self.orders_table.setItem(row, 5, QTableWidgetItem(str(qty) if qty else ""))
@@ -15819,36 +15821,38 @@ class PDFViewer(QMainWindow):
                         except Exception:
                             pass
 
-                        status_item = QTableWidgetItem(status_display)
-
-                        # Calmer, semantic tints using the shared palette
-                        # Text stays default; backgrounds use low alpha for subtle emphasis
-                        if "Paid" in status_text:
-                            # Success
-                            status_item.setBackground(QColor(34, 197, 94, 45))
-                        elif "Billed" in status_text:
-                            # Financial (info)
-                            status_item.setBackground(QColor(6, 182, 212, 45))
-                        elif "Delivered" in status_text or "Picked Up" in status_text:
-                            # Completed / delivered
-                            status_item.setBackground(QColor(34, 197, 94, 45))
-                        elif "Shipped" in status_text:
-                            # In transit
-                            status_item.setBackground(QColor(59, 130, 246, 45))
-                        elif "Processing" in status_text or "Ready" in status_text:
-                            # Active workflow
-                            status_item.setBackground(QColor(59, 130, 246, 45))
-                        elif "On Hold" in status_text:
-                            # Blocked / waiting
-                            status_item.setBackground(QColor(245, 158, 11, 45))
-                        elif "Cancelled" in status_text or "Denied" in status_text:
-                            # Terminal / error
-                            status_item.setBackground(QColor(239, 68, 68, 45))
-                        else:
-                            # Neutral pending/other
-                            status_item.setBackground(QColor(148, 163, 184, 35))
-
-                        self.orders_table.setItem(row, 11, status_item)
+                        # ── Colored status item (no widget — avoids ghost-text) ──
+                        _clean_status = status_text or "Pending"
+                        _status_styles = {
+                            "Paid":       (QColor('#22c55e'), QColor(34,  197,  94, 45)),
+                            "Billed":     (QColor('#14b8a6'), QColor(20,  184, 166, 45)),
+                            "Delivered":  (QColor('#22c55e'), QColor(34,  197,  94, 45)),
+                            "Picked Up":  (QColor('#22c55e'), QColor(34,  197,  94, 45)),
+                            "Shipped":    (QColor('#22c55e'), QColor(34,  197,  94, 45)),
+                            "Processing": (QColor('#3b82f6'), QColor(59,  130, 246, 45)),
+                            "Ready":      (QColor('#3b82f6'), QColor(59,  130, 246, 45)),
+                            "Open":       (QColor('#3b82f6'), QColor(59,  130, 246, 45)),
+                            "On Hold":    (QColor('#ef4444'), QColor(239,  68,  68, 45)),
+                            "Cancelled":  (QColor('#475569'), QColor(71,   85, 105, 45)),
+                            "Denied":     (QColor('#ef4444'), QColor(239,  68,  68, 45)),
+                            "Pending":    (QColor('#a855f7'), QColor(168,  85, 247, 45)),
+                            "Unbilled":   (QColor('#eab308'), QColor(234, 179,   8, 45)),
+                        }
+                        _sfg, _sbg = _status_styles.get(_clean_status, (QColor('#94a3b8'), QColor(148, 163, 184, 35)))
+                        if _sfg == QColor('#94a3b8'):
+                            for _key, _val in _status_styles.items():
+                                if _key in _clean_status:
+                                    _sfg, _sbg = _val
+                                    break
+                        _status_item = QTableWidgetItem(_clean_status.upper())
+                        _status_item.setForeground(_sfg)
+                        _status_item.setBackground(_sbg)
+                        _sfont = _status_item.font()
+                        _sfont.setFamily("Consolas")
+                        _sfont.setWeight(QFont.Weight.Bold)
+                        _status_item.setFont(_sfont)
+                        _status_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter | Qt.AlignmentFlag.AlignVCenter)
+                        self.orders_table.setItem(row, 11, _status_item)
                     else:
                         self.orders_table.setItem(row, 11, QTableWidgetItem(""))
                     
@@ -18003,153 +18007,42 @@ class PDFViewer(QMainWindow):
             QScrollArea.wheelEvent(self.scroll_area, event)
 
     def apply_dark_theme(self):
-        """Apply dark theme to the application."""
+        """Apply dark theme to the application.
+        
+        NOTE: The modern dme_theme / ThemeManager QSS is applied globally
+        via app.setStyleSheet(). We no longer set an inline stylesheet on
+        the QMainWindow here, as that would override the global theme and
+        break child widget styling (bottom toolbar, buttons, etc.).
+        """
         self.is_dark_theme = True
-        self.setStyleSheet("""
-            QMainWindow {
-                background-color: #1E1E1E;
-                color: white;
-            }
-            QCheckBox::indicator {
-                width: 16px; height: 16px;
-                background-color: white;
-                border: 2px solid #555;
-                border-radius: 3px;
-            }
-            QCheckBox::indicator:checked {
-                background-color: #0078D4;
-                border-color: #0078D4;
-            }
-            QCheckBox { color: white; spacing: 8px; }
-            QMenuBar {
-                background-color: #2B2B2B;
-                color: white;
-                border-bottom: 1px solid #424242;
-            }
-            QMenuBar::item {
-                background-color: transparent;
-                padding: 5px 10px;
-            }
-            QMenuBar::item:selected {
-                background-color: #424242;
-            }
-            QMenu {
-                background-color: #2B2B2B;
-                color: white;
-                border: 1px solid #424242;
-            }
-            QMenu::item:selected {
-                background-color: #0078D4;
-            }
-            QStatusBar {
-                background-color: #2B2B2B;
-                color: white;
-                border-top: 1px solid #424242;
-            }
-        """)
-        # Also update key widgets to dark variants and refresh delegates
+        # DO NOT call self.setStyleSheet() — it overrides the global dme_theme QSS
+        # Only update delegates and non-QSS widget state
         self._apply_theme_widgets()
 
     def apply_light_theme(self):
-        """Apply light theme to the application."""
+        """Apply light theme to the application.
+        
+        NOTE: The modern dme_theme / ThemeManager QSS is applied globally
+        via app.setStyleSheet(). We no longer set an inline stylesheet on
+        the QMainWindow here, as that would override the global theme.
+        """
         self.is_dark_theme = False
-        self.setStyleSheet("""
-            QMainWindow {
-                background-color: #FFFFFF;
-                color: black;
-            }
-            QCheckBox::indicator {
-                width: 16px; height: 16px;
-                background-color: white;
-                border: 2px solid #999;
-                border-radius: 3px;
-            }
-            QCheckBox::indicator:checked {
-                background-color: #0078D4;
-                border-color: #0078D4;
-            }
-            QCheckBox { color: black; spacing: 8px; }
-            QMenuBar {
-                background-color: #F0F0F0;
-                color: black;
-                border-bottom: 1px solid #CCCCCC;
-            }
-            QMenuBar::item {
-                background-color: transparent;
-                padding: 5px 10px;
-            }
-            QMenuBar::item:selected {
-                background-color: #E0E0E0;
-            }
-            QMenu {
-                background-color: #F0F0F0;
-                color: black;
-                border: 1px solid #CCCCCC;
-            }
-            QMenu::item:selected {
-                background-color: #0078D4;
-                color: white;
-            }
-            QStatusBar {
-                background-color: #F0F0F0;
-                color: black;
-                border-top: 1px solid #CCCCCC;
-            }
-        """)
-        # Also update key widgets to light variants and refresh delegates
+        # DO NOT call self.setStyleSheet() — it overrides the global dme_theme QSS
+        # Only update delegates and non-QSS widget state
         self._apply_theme_widgets()
 
     def _apply_theme_widgets(self):
-        """Apply per-widget styles for the active theme to improve readability."""
+        """Apply per-widget styles for the active theme to improve readability.
+        
+        NOTE: main_tabs and orders_table are NO LONGER styled here —
+        the global dme_theme QSS handles those. Inline stylesheets on
+        main_tabs were overriding child widget styles (bottom toolbar,
+        buttons, frames) and breaking the Orders tab layout.
+        """
         try:
-            # Tab bar styling per theme
-            if hasattr(self, 'main_tabs') and self.main_tabs is not None:
-                if self.is_dark_theme:
-                    self.main_tabs.setStyleSheet(
-                        """
-                        QTabWidget::pane { border: 1px solid #424242; background-color: #2B2B2B; }
-                        QTabWidget::tab-bar { alignment: left; }
-                        QTabBar::tab { background-color: #3C3C3C; color: white; padding: 8px 16px; margin-right: 2px; border-top-left-radius: 4px; border-top-right-radius: 4px; }
-                        QTabBar::tab:selected { background-color: #0078D4; }
-                        QTabBar::tab:hover { background-color: #505050; }
-                        """
-                    )
-                else:
-                    self.main_tabs.setStyleSheet(
-                        """
-                        QTabWidget::pane { border: 1px solid #CCCCCC; background-color: #FFFFFF; }
-                        QTabWidget::tab-bar { alignment: left; }
-                        QTabBar::tab { background-color: #F0F0F0; color: black; padding: 8px 16px; margin-right: 2px; border-top-left-radius: 4px; border-top-right-radius: 4px; }
-                        QTabBar::tab:selected { background-color: #CDE8FF; }
-                        QTabBar::tab:hover { background-color: #E6E6E6; }
-                        """
-                    )
-
-            # Styles for tables
-            table_dark = (
-                """
-                QTableWidget { background-color: #2B2B2B; gridline-color: #424242; color: white; }
-                QTableWidget::item { padding: 6px; }
-                QTableWidget::item:selected { background-color: #0078D4; color: white; }
-                QHeaderView::section { background-color: #3C3C3C; color: white; padding: 8px; border: 1px solid #424242; font-weight: bold; }
-                """
-            )
-            table_light = (
-                """
-                QTableWidget { background-color: #FFFFFF; gridline-color: #DDDDDD; color: black; }
-                QTableWidget::item { padding: 6px; color: black; }
-                QTableWidget::item:selected { background-color: #CDE8FF; color: black; }
-                QHeaderView::section { background-color: #F3F3F3; color: black; padding: 8px; border: 1px solid #CCCCCC; font-weight: bold; }
-                """
-            )
-            table_style = table_dark if self.is_dark_theme else table_light
-
-            for tbl_name in [
-                'orders_table', 'patient_order_history_table', 'refills_table',
-                'dme_inventory_table', 'prescriber_table', 'fee_table']:
-                tbl = getattr(self, tbl_name, None)
-                if tbl is not None:
-                    tbl.setStyleSheet(table_style)
+            # main_tabs: handled by global QSS (dme_theme / theme.qss)
+            # orders_table: handled by global QSS
+            pass
 
             # Date inputs: filters and refills date edits
             date_dark = (

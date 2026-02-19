@@ -13,9 +13,9 @@ import os
 import sys
 import subprocess
 from PyQt6.QtWidgets import (
-    QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
+    QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
     QLineEdit, QComboBox, QLabel, QPushButton, 
-    QFrame, QSizePolicy, QDialog, QMessageBox, QTableWidget, QToolBar, QApplication, QFileDialog
+    QFrame, QSizePolicy, QDialog, QMessageBox, QTableWidget, QToolBar, QApplication, QFileDialog, QScrollArea
 )
 from PyQt6.QtGui import QIcon, QAction
 from PyQt6.QtCore import QSize, Qt
@@ -48,8 +48,10 @@ from dmelogic.ui.rx_import_wizard import RxImportWizard
 
 def build_orders_tab(self) -> QWidget:
     """
-    Build the Orders tab UI: top filter bar, orders table, bottom summary/action panel.
-    Assumes self.orders_table already exists and is configured.
+    Build the Orders tab UI: top filter bar, orders table, bottom action bar.
+    The action bar is a single visible row of buttons plus an expandable
+    second row toggled by an arrow button – this avoids two-row layout
+    collapse issues across theme switches.
     """
     tab = QWidget()
     main_layout = QVBoxLayout(tab)
@@ -67,7 +69,6 @@ def build_orders_tab(self) -> QWidget:
     self.orders_status_combo.addItems(["All statuses", "Unbilled", "On Hold", "Open", "Pending", "Shipped", "Delivered", "Cancelled"])
 
     self.orders_date_combo = QComboBox()
-    # Date filters: match dashboard logic (week starts Monday, month starts 1st)
     self.orders_date_combo.addItems(["All dates", "This week", "This month", "This year"])
 
     top_bar.addWidget(QLabel("Search:"))
@@ -79,25 +80,30 @@ def build_orders_tab(self) -> QWidget:
     top_bar.addWidget(QLabel("Date:"))
     top_bar.addWidget(self.orders_date_combo, 1)
 
-    # Filler to push content left
     top_bar.addStretch(1)
-
     main_layout.addLayout(top_bar)
 
-    # --- Orders table (existing widget) ---
+    # --- Orders table ---
+    self.orders_table.setMinimumHeight(100)   # allow table to shrink so bottom bar fits
     main_layout.addWidget(self.orders_table, 10)
 
-    # --- Bottom summary / actions ---
+    # --- Bottom action bar ---
     bottom_frame = QFrame()
     bottom_frame.setObjectName("OrdersSummaryFrame")
-    bottom_layout = QHBoxLayout(bottom_frame)
-    bottom_layout.setContentsMargins(10, 6, 10, 6)
-    bottom_layout.setSpacing(12)
+    bottom_frame.setMinimumHeight(54)
+    bottom_frame.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
+    bottom_vbox = QVBoxLayout(bottom_frame)
+    bottom_vbox.setContentsMargins(10, 6, 10, 6)
+    bottom_vbox.setSpacing(4)
 
-    # Summary labels
+    # -- Top section: summary + primary row of buttons --
+    top_section = QHBoxLayout()
+    top_section.setSpacing(8)
+
+    # Summary labels (left)
     self.orders_summary_label = QLabel("No order selected")
     self.orders_summary_label.setProperty("typo", "section")
-    self.orders_sub_label = QLabel("")
+    self.orders_sub_label = QLabel("Click any row to select an order and use the action buttons →")
     self.orders_sub_label.setProperty("typo", "caption")
 
     summary_layout = QVBoxLayout()
@@ -106,102 +112,105 @@ def build_orders_tab(self) -> QWidget:
     summary_layout.addWidget(self.orders_summary_label)
     summary_layout.addWidget(self.orders_sub_label)
 
-    bottom_layout.addLayout(summary_layout, 4)
+    top_section.addLayout(summary_layout, 3)
 
-    # Spacer between summary and buttons
-    bottom_layout.addStretch(1)
+    def _make_btn(label: str, tooltip: str) -> QPushButton:
+        btn = QPushButton(label)
+        btn.setToolTip(tooltip)
+        return btn
 
-    # Action buttons using draggable button bar
-    def _save_order_button_order(order_list):
-        self.settings['order_button_order'] = order_list
-        self.save_settings()
-    
-    self.order_button_bar = DraggableButtonBar(save_callback=_save_order_button_order)
-    
-    # Add all buttons with keys for identification (Orders tab)
-    self.btn_edit_order = self.order_button_bar.add_button(
-        "edit_order", "✏️ Edit Order", "Edit the selected order"
-    )
-    # Make Edit Order the primary action visually
+    # Primary row buttons
+    row1_defs = [
+        ("edit_order", "✏️ Edit Order", "Edit the selected order"),
+        ("update_status", "🔄 Update Status", "Update order status"),
+        ("delivery_report", "📊 Delivery Report", "View delivery report"),
+        ("clear_delivery", "🧹 Clear Delivery", "Set delivery date to blank for the selected order"),
+        ("process_refill", "♻️ Process Refill", "Create a new order as a refill of the selected one"),
+        ("reverse_refill", "↩️ Reverse Refill", "Undo a refill: restore refills to parent and delete the refill order"),
+        ("refill_request", "📋 Refill Request", "Generate a fax to request new prescriptions from the provider"),
+        ("batch_delivered", "📦 Batch Delivered", "Mark multiple selected orders as delivered"),
+        ("batch_billed", "💰 Batch Billed", "Mark multiple selected orders as billed/paid"),
+    ]
+
+    created = {}
+    for key, text, tip in row1_defs:
+        btn = _make_btn(text, tip)
+        created[key] = btn
+        top_section.addWidget(btn)
+
+    # Expand/collapse arrow button
+    self._orders_more_btn = QPushButton("▼ More")
+    self._orders_more_btn.setToolTip("Show / hide additional action buttons")
+    self._orders_more_btn.setFixedWidth(70)
+    top_section.addWidget(self._orders_more_btn)
+
+    bottom_vbox.addLayout(top_section)
+
+    # -- Second row: extra buttons (hidden by default) --
+    self._orders_row2 = QWidget()
+    row2_layout = QHBoxLayout(self._orders_row2)
+    row2_layout.setContentsMargins(0, 2, 0, 0)
+    row2_layout.setSpacing(6)
+    row2_layout.addStretch(1)
+
+    row2_defs = [
+        ("export_portal", "📤 Export to Portal", "Export order to state portal (CSV/JSON)"),
+        ("epaces", "🔐 Bill in ePACES", "Open copy-friendly helper for manual ePACES portal entry"),
+        ("print_delivery_ticket", "🎫 Print Delivery Ticket", "Generate delivery ticket PDF for the selected order"),
+        ("generate_1500", "📄 Generate 1500 JSON", "Generate HCFA-1500 claim data (JSON preview)"),
+        ("print_1500", "🖨️ Print HCFA-1500", "Generate and print CMS-1500 claim form (PDF)"),
+        ("delete_order", "🗑️ Delete Order", "Delete the selected order"),
+        ("link_patient", "🔗 Link to Patient", "Link order to a patient"),
+        ("import_rx", "📥 Import Rx → Order", "Upload Rx PDF(s) and auto-create an order"),
+    ]
+
+    for key, text, tip in row2_defs:
+        btn = _make_btn(text, tip)
+        created[key] = btn
+        row2_layout.addWidget(btn)
+
+    row2_layout.addStretch(1)
+    self._orders_row2.setVisible(False)
+    bottom_vbox.addWidget(self._orders_row2)
+
+    # Toggle handler
+    def _toggle_more():
+        showing = not self._orders_row2.isVisible()
+        self._orders_row2.setVisible(showing)
+        self._orders_more_btn.setText("▲ Less" if showing else "▼ More")
+    self._orders_more_btn.clicked.connect(_toggle_more)
+
+    main_layout.addWidget(bottom_frame, 0)
+
+    # Expose button refs for wiring
+    self.order_button_bar = None  # no longer a standalone widget
+    self._orders_bottom_frame = bottom_frame  # keep a reference
+    self.btn_edit_order = created.get("edit_order")
+    self.btn_update_status = created.get("update_status")
+    self.btn_delivery_report = created.get("delivery_report")
+    self.btn_clear_delivery = created.get("clear_delivery")
+    self.btn_process_refill = created.get("process_refill")
+    self.btn_reverse_refill = created.get("reverse_refill")
+    self.btn_refill_request = created.get("refill_request")
+    self.btn_batch_delivered = created.get("batch_delivered")
+    self.btn_batch_billed = created.get("batch_billed")
+    self.btn_export_portal = created.get("export_portal")
+    self.btn_epaces = created.get("epaces")
+    self.btn_print_delivery_ticket = created.get("print_delivery_ticket")
+    self.btn_generate_1500 = created.get("generate_1500")
+    self.btn_print_1500 = created.get("print_1500")
+    self.btn_delete_order = created.get("delete_order")
+    self.btn_link_patient = created.get("link_patient")
+    self.btn_import_rx = created.get("import_rx")
+
     try:
         self.btn_edit_order.setProperty("primary", True)
         self.btn_edit_order.style().unpolish(self.btn_edit_order)
         self.btn_edit_order.style().polish(self.btn_edit_order)
     except Exception:
         pass
-    self.btn_update_status = self.order_button_bar.add_button(
-        "update_status", "🔄 Update Status", "Update order status"
-    )
-    self.btn_delivery_report = self.order_button_bar.add_button(
-        "delivery_report", "📊 Delivery Report", "View delivery report"
-    )
-    self.btn_clear_delivery = self.order_button_bar.add_button(
-        "clear_delivery", "🧹 Clear Delivery", "Set delivery date to blank for the selected order"
-    )
-    self.btn_process_refill = self.order_button_bar.add_button(
-        "process_refill", "♻️ Process Refill", "Create a new order as a refill of the selected one"
-    )
-    self.btn_reverse_refill = self.order_button_bar.add_button(
-        "reverse_refill", "↩️ Reverse Refill", "Undo a refill: restore refills to parent and delete the refill order"
-    )
-    self.btn_refill_request = self.order_button_bar.add_button(
-        "refill_request", "📋 Refill Request", "Generate a fax to request new prescriptions from the provider"
-    )
-    
-    # Batch operations section
-    self.btn_batch_delivered = self.order_button_bar.add_button(
-        "batch_delivered", "📦 Batch Delivered", "Mark multiple selected orders as delivered"
-    )
-    self.btn_batch_billed = self.order_button_bar.add_button(
-        "batch_billed", "💰 Batch Billed", "Mark multiple selected orders as billed/paid"
-    )
-    
-    self.btn_export_portal = self.order_button_bar.add_button(
-        "export_portal", "📤 Export to Portal", "Export order to state portal (CSV/JSON)"
-    )
-    self.btn_epaces = self.order_button_bar.add_button(
-        "epaces", "🔐 Bill in ePACES", "Open copy-friendly helper for manual ePACES portal entry"
-    )
-    self.btn_print_delivery_ticket = self.order_button_bar.add_button(
-        "print_delivery_ticket", "🎫 Print Delivery Ticket", "Generate delivery ticket PDF for the selected order"
-    )
-    self.btn_generate_1500 = self.order_button_bar.add_button(
-        "generate_1500", "📄 Generate 1500 JSON", "Generate HCFA-1500 claim data (JSON preview)"
-    )
-    self.btn_print_1500 = self.order_button_bar.add_button(
-        "print_1500", "🖨️ Print HCFA-1500", "Generate and print CMS-1500 claim form (PDF)"
-    )
-    self.btn_delete_order = self.order_button_bar.add_button(
-        "delete_order", "🗑️ Delete Order", "Delete the selected order"
-    )
-    self.btn_link_patient = self.order_button_bar.add_button(
-        "link_patient", "🔗 Link to Patient", "Link order to a patient"
-    )
-    self.btn_import_rx = self.order_button_bar.add_button(
-        "import_rx", "📥 Import Rx → Order", "Upload Rx PDF(s) and auto-create an order"
-    )
-    
-    # Restore saved button order if available
-    saved_order = self.settings.get('order_button_order', [])
-    if saved_order:
-        self.order_button_bar.set_order(saved_order)
 
-    # Persist button order on app exit to survive restarts
-    try:
-        app_instance = QApplication.instance()
-        if app_instance:
-            def _persist_order_buttons():
-                self.settings['order_button_order'] = self.order_button_bar.get_order()
-                self.save_settings()
-            app_instance.aboutToQuit.connect(_persist_order_buttons)
-    except Exception:
-        pass
-    
-    bottom_layout.addWidget(self.order_button_bar)
-
-    main_layout.addWidget(bottom_frame)
-
-    # Basic signals (you can wire these to your existing slots)
+    # Wire filter signals
     self.orders_search_edit.textChanged.connect(self.apply_table_filters)
     self.orders_status_combo.currentIndexChanged.connect(self.apply_table_filters)
     self.orders_date_combo.currentIndexChanged.connect(self.apply_table_filters)
@@ -372,6 +381,10 @@ class MainWindow(PDFViewer):
         # TODO: future: inject services, db repos, etc. here
         # e.g. self.orders_repo = OrdersRepository(...)
         # Right now we keep it minimal to avoid behavior changes.
+        try:
+            self.showMaximized()  # Start maximized to avoid layout squeeze
+        except Exception:
+            pass
         
         # Setup theme switching menu
         self._setup_theme_menu()

@@ -121,9 +121,13 @@ def main():
     logging.info("Creating QApplication...")
     app = QApplication(sys.argv)
     
-    # Theme note:
-    # The installed app UI look relies primarily on widget-level styling.
-    # Do not force-apply a global QSS theme here; it can override that look.
+    # Apply DMELogic design system theme
+    try:
+        from dme_theme import apply_theme as apply_dme_theme
+        apply_dme_theme(app)
+        logging.info("DMELogic design system theme applied.")
+    except Exception as e:
+        logging.warning(f"Could not apply DME theme: {e}")
 
     # Initialize user authentication database
     logging.info("Initializing authentication system...")
