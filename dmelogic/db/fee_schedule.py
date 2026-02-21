@@ -46,7 +46,7 @@ CREATE TABLE IF NOT EXISTS fee_schedule (
 );
 """
 
-_CREATE_INDEX_SQL = """
+_CREATE_INDEX_SQ = """
 CREATE INDEX IF NOT EXISTS idx_fee_schedule_hcpcs ON fee_schedule(hcpcs_code);
 """
 

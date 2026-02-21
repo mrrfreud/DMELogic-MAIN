@@ -6023,7 +6023,7 @@ class SettingsDialog(QDialog):
             self.ringcentral_widget = RingCentralSettingsWidget(self)
             layout.addWidget(self.ringcentral_widget)
             
-            self.tab_widget.addTab(tab, "📞 RingCentral")
+            self.tab_widget.addTab(tab, "RingCentral")
         except ImportError as e:
             # If module not available, show placeholder
             tab = QWidget()
@@ -6031,7 +6031,7 @@ class SettingsDialog(QDialog):
             layout.addWidget(QLabel("RingCentral integration not available.\n"
                                    f"Error: {e}"))
             layout.addStretch()
-            self.tab_widget.addTab(tab, "📞 RingCentral")
+            self.tab_widget.addTab(tab, "RingCentral")
     
     def choose_accent_color(self):
         """Open color dialog for accent color selection."""
@@ -9594,6 +9594,8 @@ class PDFViewer(QMainWindow):
         self.central_widget = QWidget()
         self.setCentralWidget(self.central_widget)
         self.main_layout = QVBoxLayout(self.central_widget)
+        self.main_layout.setContentsMargins(0, 0, 0, 0)
+        self.main_layout.setSpacing(0)
         
         # Create main tab widget — horizontal top navigation
         self.main_tabs = QTabWidget()
@@ -9688,6 +9690,51 @@ class PDFViewer(QMainWindow):
         # Mount ribbon + tabs into the main layout
         self.main_layout.addWidget(self.datetime_banner)
         self.main_layout.addWidget(self.backup_mode_banner)
+
+        # --- Pinned Sticky Notes shortcut bar ---
+        self._pinned_notes_bar = QFrame()
+        self._pinned_notes_bar.setObjectName("PinnedNotesBar")
+        self._pinned_notes_bar.setStyleSheet("""
+            QFrame#PinnedNotesBar {
+                background-color: #111620;
+                border-bottom: 1px solid #1e2d45;
+                padding: 2px 6px;
+            }
+        """)
+        self._pinned_notes_layout = QHBoxLayout(self._pinned_notes_bar)
+        self._pinned_notes_layout.setContentsMargins(8, 3, 8, 3)
+        self._pinned_notes_layout.setSpacing(6)
+
+        pinned_label = QLabel("Sticky Notes")
+        pinned_label.setStyleSheet("color: #64748b; font-size: 8pt; font-weight: 600; border: none; background: transparent;")
+        self._pinned_notes_layout.addWidget(pinned_label)
+
+        # "Open" button — opens the full Sticky Notes manager dialog
+        open_notes_btn = QPushButton("Open")
+        open_notes_btn.setToolTip("Open the Sticky Notes manager")
+        open_notes_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        open_notes_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #1e293b;
+                color: #93c5fd;
+                border: 1px solid #253550;
+                border-radius: 4px;
+                padding: 3px 10px;
+                font-size: 8pt;
+                font-weight: 600;
+            }
+            QPushButton:hover {
+                background-color: #334155;
+                color: #bfdbfe;
+                border-color: #3b82f6;
+            }
+        """)
+        open_notes_btn.clicked.connect(self._open_sticky_notes_manager)
+        self._pinned_notes_layout.addWidget(open_notes_btn)
+
+        self._pinned_notes_layout.addStretch()
+        self.main_layout.addWidget(self._pinned_notes_bar)
+
         self.main_layout.addWidget(self.main_tabs)
         try:
             self._relocate_datetime_banner(self.main_tabs.currentIndex())
@@ -9702,6 +9749,10 @@ class PDFViewer(QMainWindow):
         
         # Start message notifier after short delay (don't slow down startup)
         QTimer.singleShot(5000, self._start_message_notifier)  # Start after 5 seconds
+
+        # Load pinned sticky notes into the shortcut bar (after brief delay)
+        QTimer.singleShot(2000, self._refresh_pinned_notes_bar)
+
 
     def backfill_orders_patient_dob(self):
         """Ensure orders.patient_dob is populated for legacy rows by looking up
@@ -10052,7 +10103,7 @@ class PDFViewer(QMainWindow):
         
         # Search input
         search_label = QLabel("Search Documents")
-        search_label.setStyleSheet("font-weight: 600; font-size: 11pt; color: #ffffff;")
+        search_label.setStyleSheet("font-weight: 600; font-size: 11pt;")
         left_layout.addWidget(search_label)
         
         self.search_input = QLineEdit()
@@ -10181,16 +10232,15 @@ class PDFViewer(QMainWindow):
         # Make the styling *explicit* so it can't get overridden and text never disappears
         self.search_results_table.setStyleSheet("""
             QTreeWidget#searchResultsTable {
-                background-color: #1E1E1E;
-                border: 1px solid #404040;
-                color: #E0E0E0;
+                border: 1px solid #d0d4dc;
                 font-size: 10px;
-                min-height: 140px;
-                max-height: 170px;
+                color: #1e293b;
+                background-color: #ffffff;
             }
 
             QTreeWidget#searchResultsTable::item {
                 height: 22px;
+                color: #1e293b;
             }
 
             QTreeWidget#searchResultsTable::item:selected {
@@ -10199,15 +10249,18 @@ class PDFViewer(QMainWindow):
             }
 
             QHeaderView::section {
-                background-color: #303030;
-                color: #CCCCCC;
+                background-color: #f1f5f9;
+                color: #475569;
                 padding: 4px;
-                border: 1px solid #424242;
+                border: none;
+                border-bottom: 1px solid #d0d4dc;
+                font-weight: bold;
             }
         """)
+        self.search_results_table.setMaximumHeight(150)
         
         self.search_results_table.itemActivated.connect(self.on_search_result_row_activated)
-        self.search_results_table.itemDoubleClicked.connect(self.on_search_result_row_activated)
+        self.search_results_table.currentItemChanged.connect(self.on_search_result_selection_changed)
         left_layout.addWidget(self.search_results_table)
 
         # Search status label
@@ -10243,7 +10296,7 @@ class PDFViewer(QMainWindow):
         # Current folder info and controls
         folder_info_layout = QHBoxLayout()
         self.folder_label = QLabel(f"Current: {os.path.basename(self.folder_path)}")
-        self.folder_label.setStyleSheet("font-weight: bold; color: #4FC3F7; font-size: 11px;")
+        self.folder_label.setStyleSheet("font-weight: bold; color: #0078D4; font-size: 11px;")
         
         self.change_folder_btn = QPushButton("📁 Browse")
         self.change_folder_btn.clicked.connect(self.change_folder)
@@ -10272,12 +10325,21 @@ class PDFViewer(QMainWindow):
         
         left_layout.addLayout(folder_controls_layout)
         
-        # Separator
-        separator = QLabel("─" * 40)
-        separator.setStyleSheet("color: #424242; font-size: 8px;")
-        separator.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        left_layout.addWidget(separator)
+        left_layout.addStretch()
         
+        content_splitter.addWidget(left_pane)
+
+        # --- PANE 2: FILE LIST (full height) ---
+        files_pane = QWidget()
+        files_pane.setObjectName("DocFilesPane")
+        files_layout = QVBoxLayout(files_pane)
+        files_layout.setContentsMargins(4, 8, 4, 4)
+        files_layout.setSpacing(4)
+
+        files_header = QLabel("Files")
+        files_header.setStyleSheet("font-weight: 600; font-size: 11pt;")
+        files_layout.addWidget(files_header)
+
         # === FILE LIST ===
         self.file_list_widget = QListWidget()
         # Enable context menu for file operations
@@ -10295,14 +10357,14 @@ class PDFViewer(QMainWindow):
         # Setup persistent highlighting for search results
         self.setup_persistent_highlighting()
         
-        left_layout.addWidget(self.file_list_widget)
+        files_layout.addWidget(self.file_list_widget, 1)
 
-        # Left panel status
+        # File list status
         self.left_status_label = QLabel("Ready • 0 files indexed")
         self.left_status_label.setStyleSheet("color: #9AA0A6; font-size: 10px; margin: 2px 4px;")
-        left_layout.addWidget(self.left_status_label)
+        files_layout.addWidget(self.left_status_label)
         
-        content_splitter.addWidget(left_pane)
+        content_splitter.addWidget(files_pane)
 
         # --- CENTER PANE: PDF VIEWER ---
         center_pane = QWidget()
@@ -10399,7 +10461,7 @@ class PDFViewer(QMainWindow):
 
         # Scrollable area for the PDF image
         self.scroll_area = QScrollArea()
-        self.scroll_area.setStyleSheet("background-color: #1e1e1e; border: none;")
+        self.scroll_area.setStyleSheet("background-color: #e5e7eb; border: none;")
         
         self.pdf_label = QLabel("Select a file to view")
         self.pdf_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -10426,7 +10488,7 @@ class PDFViewer(QMainWindow):
 
         # Patient Information Section
         patient_info_label = QLabel("Patient Information")
-        patient_info_label.setStyleSheet("font-weight: 600; font-size: 11pt; color: #ffffff; margin-bottom: 4px;")
+        patient_info_label.setStyleSheet("font-weight: 600; font-size: 11pt; margin-bottom: 4px;")
         info_layout.addWidget(patient_info_label)
 
         # First Name
@@ -10491,12 +10553,16 @@ class PDFViewer(QMainWindow):
         
         content_splitter.addWidget(right_pane)
 
-        # Set initial sizes for the three panes (LEFT: 350, CENTER: 650, RIGHT: 300)
-        content_splitter.setSizes([350, 650, 300])
+        # Set initial sizes for the four panes (CONTROLS: 280, FILES: 300, VIEWER: 500, PATIENT: 220)
+        content_splitter.setSizes([280, 300, 500, 220])
+        content_splitter.setStretchFactor(0, 0)  # controls pane stays compact
+        content_splitter.setStretchFactor(1, 1)  # files pane grows
+        content_splitter.setStretchFactor(2, 2)  # viewer pane grows most
+        content_splitter.setStretchFactor(3, 0)  # patient info stays fixed
         self.layout.addWidget(content_splitter)
 
         # Add document viewer tab to main tabs
-        self.main_tabs.addTab(doc_tab, "📄 Document Viewer")
+        self.main_tabs.addTab(doc_tab, "Document Viewer")
 
         # === KEYBOARD SHORTCUTS FOR PRODUCTIVITY ===
         from PyQt6.QtGui import QShortcut, QKeySequence
@@ -10879,20 +10945,6 @@ class PDFViewer(QMainWindow):
         alerts_layout = QVBoxLayout(alerts_group)
         
         self.dash_alerts_list = QListWidget()
-        self.dash_alerts_list.setStyleSheet("""
-            QListWidget {
-                background-color: #2B2B2B;
-                color: white;
-                border: none;
-            }
-            QListWidget::item {
-                padding: 8px;
-                border-bottom: 1px solid #444;
-            }
-            QListWidget::item:hover {
-                background-color: #3C3C3C;
-            }
-        """)
         self.dash_alerts_list.setMaximumHeight(200)
         self.dash_alerts_list.itemDoubleClicked.connect(self._dash_handle_alert_click)
         alerts_layout.addWidget(self.dash_alerts_list)
@@ -10905,7 +10957,7 @@ class PDFViewer(QMainWindow):
         layout.addLayout(content_layout)
 
         # Add to main tabs as FIRST tab
-        self.main_tabs.insertTab(0, dashboard_tab, "🏠 Dashboard")
+        self.main_tabs.insertTab(0, dashboard_tab, "Dashboard")
         self.main_tabs.setCurrentIndex(0)
 
         # Load dashboard data
@@ -11668,7 +11720,7 @@ class PDFViewer(QMainWindow):
             lambda current, previous: self.on_patient_table_selected(current.row())
         )
         
-        self.main_tabs.addTab(patients_tab, "👥 Patients")
+        self.main_tabs.addTab(patients_tab, "Patients")
         
         # Load patients from database
         self.load_patients_table()
@@ -13191,7 +13243,7 @@ class PDFViewer(QMainWindow):
         
         layout.addLayout(status_layout)
         
-        self.main_tabs.addTab(prescriber_tab, "🩺 Prescribers")
+        self.main_tabs.addTab(prescriber_tab, "Prescribers")
         self.load_prescribers()
 
     def open_prescriber_sticky_notes(self):
@@ -13345,7 +13397,7 @@ class PDFViewer(QMainWindow):
         
         layout.addLayout(status_layout)
         
-        self.main_tabs.addTab(clinics_tab, "🏥 Clinics")
+        self.main_tabs.addTab(clinics_tab, "Clinics")
         self.load_clinics()
 
     def load_clinics(self):
@@ -13593,18 +13645,7 @@ class PDFViewer(QMainWindow):
         search_layout = QHBoxLayout()
         self.patient_search = QLineEdit()
         self.patient_search.setPlaceholderText("🔍 Search patients...")
-        self.patient_search.setStyleSheet("""
-            QLineEdit {
-                padding: 8px;
-                border: 2px solid #424242;
-                border-radius: 4px;
-                background-color: #2B2B2B;
-                color: white;
-                font-size: 12px;
-                text-transform: uppercase;
-            }
-            QLineEdit:focus { border-color: #0078D4; }
-        """)
+        self.patient_search.setStyleSheet("QLineEdit { text-transform: uppercase; }")
         
         # Connect search field to uppercase conversion and search functionality
         self.patient_search.textChanged.connect(lambda text: self.convert_to_uppercase(self.patient_search, text))
@@ -13649,25 +13690,6 @@ class PDFViewer(QMainWindow):
         
         # Patient list
         self.patient_list = QListWidget()
-        self.patient_list.setStyleSheet("""
-            QListWidget {
-                background-color: #2B2B2B;
-                border: 1px solid #424242;
-                border-radius: 4px;
-                color: white;
-                padding: 5px;
-            }
-            QListWidget::item {
-                padding: 8px;
-                border-bottom: 1px solid #3C3C3C;
-            }
-            QListWidget::item:selected {
-                background-color: #0078D4;
-            }
-            QListWidget::item:hover {
-                background-color: #3C3C3C;
-            }
-        """)
         
         # Patient list will be populated by search results only
         # Initially empty - patients appear only when searched
@@ -13689,15 +13711,8 @@ class PDFViewer(QMainWindow):
         scroll_area.setWidgetResizable(True)
         scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
-        scroll_area.setStyleSheet("""
-            QScrollArea {
-                background-color: #1E1E1E;
-                border: none;
-            }
-        """)
         
         scroll_content = QWidget()
-        scroll_content.setStyleSheet("background-color: #1E1E1E;")
         scroll_layout = QVBoxLayout(scroll_content)
         scroll_layout.setContentsMargins(10, 10, 10, 10)
         scroll_layout.setSpacing(10)
@@ -13729,35 +13744,15 @@ class PDFViewer(QMainWindow):
         row = 1
         for label_text, field_name in fields:
             label = QLabel(label_text)
-            label.setStyleSheet("color: white; font-weight: bold;")
+            label.setStyleSheet("font-weight: bold;")
             
             if field_name == "gender":
                 from PyQt6.QtWidgets import QComboBox
                 field = QComboBox()
                 field.addItems(["", "Male", "Female", "Other", "Unknown"])
-                field.setStyleSheet("""
-                    QComboBox {
-                        padding: 6px;
-                        border: 1px solid #424242;
-                        border-radius: 3px;
-                        background-color: #2B2B2B;
-                        color: white;
-                    }
-                    QComboBox:focus { border-color: #0078D4; }
-                """)
             else:
                 field = QLineEdit()
-                field.setStyleSheet("""
-                    QLineEdit {
-                        padding: 6px;
-                        border: 1px solid #424242;
-                        border-radius: 3px;
-                        background-color: #2B2B2B;
-                        color: white;
-                        text-transform: uppercase;
-                    }
-                    QLineEdit:focus { border-color: #0078D4; }
-                """)
+                field.setStyleSheet("QLineEdit { text-transform: uppercase; }")
                 # Add appropriate formatter based on field type
                 if field_name == "dob":
                     field.textChanged.connect(lambda text, f=field: self.format_date_field(f, text))
@@ -13787,7 +13782,7 @@ class PDFViewer(QMainWindow):
         
         for label_text, field_name, is_insurance in insurance_fields:
             label = QLabel(label_text)
-            label.setStyleSheet("color: white; font-weight: bold;")
+            label.setStyleSheet("font-weight: bold;")
             
             if is_insurance:
                 # Create combo box for insurance fields
@@ -13795,17 +13790,7 @@ class PDFViewer(QMainWindow):
             else:
                 # Create regular text field for policy/group numbers
                 field = QLineEdit()
-                field.setStyleSheet("""
-                    QLineEdit {
-                        padding: 6px;
-                        border: 1px solid #424242;
-                        border-radius: 3px;
-                        background-color: #2B2B2B;
-                        color: white;
-                        text-transform: uppercase;
-                    }
-                    QLineEdit:focus { border-color: #0078D4; }
-                """)
+                field.setStyleSheet("QLineEdit { text-transform: uppercase; }")
                 
                 # Connect text changed signal to convert to uppercase
                 field.textChanged.connect(lambda text, f=field: self.convert_to_uppercase(f, text))
@@ -13822,18 +13807,7 @@ class PDFViewer(QMainWindow):
         row += 1
         
         notes_field = QTextEdit()
-        notes_field.setStyleSheet("""
-            QTextEdit {
-                padding: 6px;
-                border: 1px solid #424242;
-                border-radius: 3px;
-                background-color: #2B2B2B;
-                color: white;
-                font-family: Arial;
-                max-height: 100px;
-            }
-            QTextEdit:focus { border-color: #0078D4; }
-        """)
+        notes_field.setStyleSheet("QTextEdit { max-height: 100px; }")
         notes_field.setPlaceholderText("Enter patient notes, medical history, or other relevant information...")
         form_layout.addWidget(notes_field, row, 0, 1, 2)
         self.patient_fields["notes"] = notes_field
@@ -14417,28 +14391,6 @@ class PDFViewer(QMainWindow):
         
         # DME Inventory grid
         self.dme_inventory_table = QTableWidget()
-        self.dme_inventory_table.setStyleSheet("""
-            QTableWidget {
-                background-color: #2B2B2B;
-                border: 1px solid #424242;
-                gridline-color: #424242;
-                color: white;
-            }
-            QTableWidget::item {
-                padding: 8px;
-                border-bottom: 1px solid #3C3C3C;
-            }
-            QTableWidget::item:selected {
-                background-color: #0078D4;
-            }
-            QHeaderView::section {
-                background-color: #3C3C3C;
-                color: white;
-                padding: 8px;
-                border: 1px solid #424242;
-                font-weight: bold;
-            }
-        """)
         
         # Set up table columns to match requirements
         columns = ["ITEM ID", "HCPCS", "DESCRIPTION", "CATEGORY", "COST", "BILL AMOUNT", "BRAND", "SOURCE", "STOCK", "REORDER LEVEL"]
@@ -14543,7 +14495,7 @@ class PDFViewer(QMainWindow):
         layout.addWidget(button_frame)
         
         # Add tab to main tabs
-        self.main_tabs.addTab(inventory_tab, "📦 DME Inventory")
+        self.main_tabs.addTab(inventory_tab, "DME Inventory")
         
     def load_dme_inventory_data(self):
         """Load inventory data from database into the DME inventory table."""
@@ -14715,7 +14667,7 @@ class PDFViewer(QMainWindow):
         
         # Set up table columns
         columns = [
-            "Order #", "Patient", "HCPCS", "Item #", "Description",
+            "Order #", "Patient", "DOB", "HCPCS", "Description",
             "Qty Disp.", "Refills", "Days", "Order Date",
             "Refill Due Date", "Del/PU Date", "Status", "Tracking #", "Notes", "Paid", "Paid Date"
         ]
@@ -14795,7 +14747,7 @@ class PDFViewer(QMainWindow):
             lambda current, previous: self.on_order_selected(current.row())
         )
         
-        self.main_tabs.addTab(orders_tab, "📋 Orders")
+        self.main_tabs.addTab(orders_tab, "Orders")
         
         # Load orders from database
         self.load_orders()
@@ -14881,7 +14833,6 @@ class PDFViewer(QMainWindow):
         self.go_out_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self.go_out_table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
         self.go_out_table.setAlternatingRowColors(True)
-        self.go_out_table.setStyleSheet("QTableWidget { background-color: #2B2B2B; color: white; }")
         self.go_out_table.itemSelectionChanged.connect(self.update_must_go_out_buttons)
         self.go_out_table.cellDoubleClicked.connect(self.open_order_from_go_out)
         layout.addWidget(self.go_out_table)
@@ -14910,7 +14861,7 @@ class PDFViewer(QMainWindow):
 
         layout.addLayout(controls)
 
-        self.main_tabs.addTab(go_tab, "🚚 Must Go Out")
+        self.main_tabs.addTab(go_tab, "Must Go Out")
         self.load_must_go_out_entries()
 
     def _format_timestamp_display(self, value: str | None) -> str:
@@ -15004,6 +14955,143 @@ class PDFViewer(QMainWindow):
                 self.main_layout.insertWidget(0, self.datetime_banner)
         except Exception as e:
             print(f"Datetime banner relocate error: {e}")
+
+    # ── Pinned Sticky Notes shortcut bar ──────────────────────────
+    def _refresh_pinned_notes_bar(self):
+        """Load pinned sticky notes and populate the shortcut bar with buttons."""
+        try:
+            from dmelogic.db import sticky_notes as notes_db
+            from dmelogic.ui.sticky_note_widget import StickyNoteWindow
+
+            all_notes = notes_db.list_notes(include_archived=False,
+                                            folder_path=getattr(self, "folder_path", None))
+            pinned = [n for n in all_notes if n.get("pinned")]
+
+            bar = self._pinned_notes_bar
+            layout = self._pinned_notes_layout
+
+            # Clear old pinned buttons (keep label at 0, Open btn at 1, stretch at end)
+            while layout.count() > 3:
+                item = layout.takeAt(2)
+                if item and item.widget():
+                    item.widget().deleteLater()
+
+            if not pinned:
+                bar.setVisible(True)  # still show bar for the Open button
+                return
+
+            # Color map for note colors → button accent
+            _NOTE_COLORS = {
+                "#FFFACD": "#b8860b",  # yellow → dark goldenrod
+                "#FFDAB9": "#d2691e",  # peach  → chocolate
+                "#D4EDDA": "#2e7d32",  # green  → dark green
+                "#D1ECF1": "#0277bd",  # blue   → dark blue
+                "#F8D7DA": "#c62828",  # pink   → dark red
+                "#E2D9F3": "#6a1b9a",  # purple → dark purple
+            }
+
+            for note in pinned:
+                title = (note.get("title") or "").strip() or f"Note #{note['id']}"
+                # Truncate long titles
+                display = title if len(title) <= 25 else title[:22] + "..."
+                color = note.get("color") or "#FFFACD"
+                accent = _NOTE_COLORS.get(color, "#94a3b8")
+
+                btn = QPushButton(f"  {display}")
+                btn.setToolTip(f"Open pinned note: {title}")
+                btn.setCursor(Qt.CursorShape.PointingHandCursor)
+                btn.setStyleSheet(f"""
+                    QPushButton {{
+                        background-color: #161d2c;
+                        color: {accent};
+                        border: 1px solid #253550;
+                        border-left: 3px solid {accent};
+                        border-radius: 4px;
+                        padding: 3px 10px;
+                        font-size: 8pt;
+                        font-weight: 600;
+                    }}
+                    QPushButton:hover {{
+                        background-color: #1e293b;
+                        border-color: {accent};
+                        color: #f1f5f9;
+                    }}
+                """)
+                note_id = note["id"]
+                btn.clicked.connect(lambda checked=False, nid=note_id: self._open_pinned_sticky(nid))
+                layout.insertWidget(layout.count() - 1, btn)  # before stretch
+
+            bar.setVisible(True)
+        except Exception as e:
+            print(f"Pinned notes bar error: {e}")
+
+    def _open_pinned_sticky(self, note_id: int):
+        """Open a pinned sticky note as a floating window."""
+        try:
+            from dmelogic.db import sticky_notes as notes_db
+            from dmelogic.ui.sticky_note_widget import StickyNoteWindow
+
+            folder = getattr(self, "folder_path", None)
+
+            # Check if already open
+            if hasattr(self, "_sticky_windows") and note_id in self._sticky_windows:
+                win = self._sticky_windows[note_id]
+                if win and win.isVisible():
+                    win.raise_()
+                    win.activateWindow()
+                    return
+
+            all_notes = notes_db.list_notes(include_archived=False, folder_path=folder)
+            note = next((n for n in all_notes if n.get("id") == note_id), None)
+            if not note:
+                return
+
+            # Load links
+            note["links"] = notes_db.get_note_links(note_id, folder_path=folder)
+
+            win = StickyNoteWindow(note, folder_path=folder, parent=None)
+            win.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, False)
+            win.show()
+            win.raise_()
+
+            if not hasattr(self, "_sticky_windows"):
+                self._sticky_windows = {}
+            self._sticky_windows[note_id] = win
+        except Exception as e:
+            print(f"Failed to open pinned sticky note {note_id}: {e}")
+
+    def _open_sticky_notes_manager(self):
+        """Open the full Sticky Notes manager dialog."""
+        try:
+            from dmelogic.ui.components.sticky_notes_panel import StickyNotesPanel
+
+            dlg = QDialog(self)
+            dlg.setWindowTitle("Sticky Notes Manager")
+            dlg.resize(700, 500)
+            dlg.setMinimumSize(500, 350)
+            layout = QVBoxLayout(dlg)
+            layout.setContentsMargins(8, 8, 8, 8)
+
+            panel = StickyNotesPanel(
+                entity_type=None,
+                entity_id=None,
+                folder_path=getattr(self, "folder_path", None),
+                parent=dlg,
+            )
+            layout.addWidget(panel)
+
+            close_btn = QPushButton("Close")
+            close_btn.setFixedWidth(100)
+            close_btn.clicked.connect(dlg.close)
+            btn_row = QHBoxLayout()
+            btn_row.addStretch()
+            btn_row.addWidget(close_btn)
+            layout.addLayout(btn_row)
+
+            dlg.finished.connect(lambda: self._refresh_pinned_notes_bar())
+            dlg.show()
+        except Exception as e:
+            QMessageBox.warning(self, "Sticky Notes", f"Failed to open sticky notes: {e}")
 
     def _on_backup_mode_changed(self, is_backup_mode: bool, reason: str):
         """Handle backup mode state changes - show/hide banner and disable writes.
@@ -15531,6 +15619,10 @@ class PDFViewer(QMainWindow):
                 order_date = order["order_date"]
                 last_name = order["patient_last_name"]
                 first_name = order["patient_first_name"]
+                try:
+                    patient_dob = order["patient_dob"]
+                except (KeyError, IndexError):
+                    patient_dob = None
                 status = order["order_status"]
                 delivery_date = order["delivery_date"]
                 pickup_date = order["pickup_date"]
@@ -15557,6 +15649,14 @@ class PDFViewer(QMainWindow):
                     patient_phone = order["patient_phone"] or ""
                 except (KeyError, IndexError):
                     patient_phone = ""
+                # Prepare DOB display once per order for reuse across item rows
+                if patient_dob:
+                    try:
+                        patient_dob_display = self.format_date_display(patient_dob)
+                    except Exception:
+                        patient_dob_display = patient_dob
+                else:
+                    patient_dob_display = ""
                 # Handle optional fields - use try/except or check keys
                 try:
                     is_billed = order["billed"] or 0
@@ -15687,16 +15787,26 @@ class PDFViewer(QMainWindow):
                     self.orders_table.setItem(row, 0, order_item)
                     self.orders_table.setItem(row, 1, patient_item)
 
-                    # ── HCPCS colored item (no widget — avoids ghost-text) ──
-                    _hcpcs_item = QTableWidgetItem(item_hcpcs if (item_hcpcs and idx == 0) else "")
-                    if item_hcpcs and idx == 0:
+                    # Patient DOB column (col 2, first row only)
+                    dob_text = patient_dob_display if idx == 0 else ""
+                    dob_item = QTableWidgetItem(dob_text)
+                    dob_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter | Qt.AlignmentFlag.AlignVCenter)
+                    self.orders_table.setItem(row, 2, dob_item)
+
+                    # ── HCPCS colored item (col 3, trimmed before hyphen) ──
+                    hcpcs_clean = ""
+                    if item_hcpcs:
+                        parts = item_hcpcs.split("-", 1)
+                        hcpcs_clean = parts[0].strip()
+                    _hcpcs_item = QTableWidgetItem(hcpcs_clean if (hcpcs_clean and idx == 0) else "")
+                    if hcpcs_clean and idx == 0:
                         _hcpcs_fg, _hcpcs_bg = {
                             'A': (QColor('#14b8a6'), QColor(20,  184, 166, 40)),
                             'T': (QColor('#a855f7'), QColor(168,  85, 247, 40)),
                             'E': (QColor('#3b82f6'), QColor( 59, 130, 246, 40)),
                             'K': (QColor('#f97316'), QColor(249, 115,  22, 40)),
                             'L': (QColor('#22c55e'), QColor( 34, 197,  94, 40)),
-                        }.get((item_hcpcs[:1]).upper(), (QColor('#3b82f6'), QColor(59, 130, 246, 40)))
+                        }.get((hcpcs_clean[:1]).upper(), (QColor('#3b82f6'), QColor(59, 130, 246, 40)))
                         _hcpcs_item.setForeground(_hcpcs_fg)
                         _hcpcs_item.setBackground(_hcpcs_bg)
                         _font = _hcpcs_item.font()
@@ -15704,9 +15814,8 @@ class PDFViewer(QMainWindow):
                         _font.setWeight(QFont.Weight.Bold)
                         _hcpcs_item.setFont(_font)
                         _hcpcs_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter | Qt.AlignmentFlag.AlignVCenter)
-                    self.orders_table.setItem(row, 2, _hcpcs_item)
+                    self.orders_table.setItem(row, 3, _hcpcs_item)
 
-                    self.orders_table.setItem(row, 3, QTableWidgetItem(item_number or ""))
                     self.orders_table.setItem(row, 4, QTableWidgetItem(item_desc or ""))
                     self.orders_table.setItem(row, 5, QTableWidgetItem(str(qty) if qty else ""))
                     
@@ -15727,14 +15836,14 @@ class PDFViewer(QMainWindow):
 
                     # Calculate Refill Due Date for this item
                     due_item = QTableWidgetItem("")
-                    
+                    due_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter | Qt.AlignmentFlag.AlignVCenter)
+
                     # Check if item has refills remaining
                     try:
                         refills_int = int(refills_val) if refills_val else 0
                     except Exception:
                         refills_int = 0
-                    
-                    # If no refills remaining, show X with strikethrough style
+
                     if refills_int <= 0:
                         due_item.setText("✗")
                         due_item.setBackground(QColor(220, 53, 69, 180))  # Red background
@@ -15742,7 +15851,6 @@ class PDFViewer(QMainWindow):
                         font = due_item.font()
                         font.setBold(True)
                         due_item.setFont(font)
-                        due_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
                     else:
                         try:
                             if days_val and (order_date or rx_date):
@@ -15773,7 +15881,7 @@ class PDFViewer(QMainWindow):
 
                                     if due_date is not None:
                                         days_until_due = (due_date - today).days
-                                        
+
                                         if days_until_due <= 0:
                                             # Due or overdue: GREEN (due date cell only)
                                             due_item.setBackground(QColor(40, 167, 69, 120))
@@ -15815,7 +15923,11 @@ class PDFViewer(QMainWindow):
                     if idx == 0:
                         # Add RX on file badge to status display
                         try:
-                            rx_on_file_val = order.get("rx_on_file", 0) or 0
+                            try:
+                                rx_on_file_val = order["rx_on_file"]
+                            except (KeyError, IndexError):
+                                rx_on_file_val = 0
+                            rx_on_file_val = rx_on_file_val or 0
                             if int(rx_on_file_val):
                                 status_display = f"📋 RX | {status_display}"
                         except Exception:
@@ -15887,7 +15999,8 @@ class PDFViewer(QMainWindow):
             
             # Set column widths
             header = self.orders_table.horizontalHeader()
-            header.resizeSection(2, 180)  # HCPCS Code (widened)
+            header.resizeSection(2, 110)  # DOB column
+            header.resizeSection(3, 180)  # HCPCS column
             self.orders_table.resizeColumnsToContents()
             print(f"✅ Loaded {len(orders)} orders (expanded to item rows)")
             self._orders_updating = False
@@ -16334,7 +16447,7 @@ class PDFViewer(QMainWindow):
         
         layout.addLayout(status_layout)
         
-        self.main_tabs.addTab(inventory_tab, "📦 Inventory")
+        self.main_tabs.addTab(inventory_tab, "Inventory")
         self.load_inventory_data()
 
     def create_billing_tab(self):
@@ -16424,7 +16537,7 @@ class PDFViewer(QMainWindow):
         
         layout.addLayout(summary_layout)
         
-        self.main_tabs.addTab(billing_tab, "💰 Billing")
+        self.main_tabs.addTab(billing_tab, "Billing")
         self.load_billing_data()
 
     def create_reports_tab(self):
@@ -16714,7 +16827,7 @@ class PDFViewer(QMainWindow):
         try:
             from dmelogic.ui.audit_tab import build_audit_tab
             audit_tab = build_audit_tab(self)
-            self.main_tabs.addTab(audit_tab, "🔍 Audit")
+            self.main_tabs.addTab(audit_tab, "Audit")
         except Exception as e:
             import traceback
             traceback.print_exc()
@@ -17121,7 +17234,7 @@ class PDFViewer(QMainWindow):
                 parent=self,
             )
             self.refill_queue.refill_processed.connect(lambda: self.load_orders())
-            self.main_tabs.addTab(self.refill_queue, "💊 Refill Queue")
+            self.main_tabs.addTab(self.refill_queue, "Refill Queue")
             return
         except Exception as e:
             print(f"⚠️ Failed to load RefillQueueWidget, falling back to legacy: {e}")
@@ -17245,27 +17358,6 @@ class PDFViewer(QMainWindow):
         # Enable sorting
         self.refills_table.setSortingEnabled(True)
         
-        # Style the table
-        self.refills_table.setStyleSheet("""
-            QTableWidget {
-                background-color: #2B2B2B;
-                alternate-background-color: #363636;
-                gridline-color: #424242;
-                color: white; /* default text color */
-            }
-            QTableWidget::item {
-                padding: 5px;
-                color: white; /* ensure item text is white */
-            }
-            QHeaderView::section {
-                background-color: #3C3C3C;
-                color: white;
-                padding: 8px;
-                border: 1px solid #424242;
-                font-weight: bold;
-            }
-        """)
-        
         self.refills_table.setAlternatingRowColors(True)
         
         layout.addWidget(self.refills_table)
@@ -17279,7 +17371,7 @@ class PDFViewer(QMainWindow):
         except Exception:
             pass
 
-        self.main_tabs.addTab(refills_tab, "💊 Process Refills")
+        self.main_tabs.addTab(refills_tab, "Process Refills")
 
     def generate_refill_list(self):
         """Generate list of orders due for refills within the date range"""
@@ -18034,55 +18126,11 @@ class PDFViewer(QMainWindow):
     def _apply_theme_widgets(self):
         """Apply per-widget styles for the active theme to improve readability.
         
-        NOTE: main_tabs and orders_table are NO LONGER styled here —
-        the global dme_theme QSS handles those. Inline stylesheets on
-        main_tabs were overriding child widget styles (bottom toolbar,
-        buttons, frames) and breaking the Orders tab layout.
+        NOTE: All widget styling is now handled by the global dme_theme QSS.
+        This method only updates non-QSS widget state (e.g., checkbox delegates).
         """
         try:
-            # main_tabs: handled by global QSS (dme_theme / theme.qss)
-            # orders_table: handled by global QSS
-            pass
-
-            # Date inputs: filters and refills date edits
-            date_dark = (
-                """
-                QDateEdit { background-color: #2B2B2B; border: 1px solid #424242; color: white; padding: 2px 6px; border-radius: 3px; }
-                QDateEdit::drop-down { subcontrol-origin: padding; subcontrol-position: top right; width: 18px; border-left: 1px solid #424242; }
-                QDateEdit::down-arrow { image: none; }
-                """
-            )
-            date_light = (
-                """
-                QDateEdit { background-color: #FFFFFF; border: 1px solid #CCCCCC; color: black; padding: 2px 6px; border-radius: 3px; }
-                QDateEdit::drop-down { subcontrol-origin: padding; subcontrol-position: top right; width: 18px; border-left: 1px solid #CCCCCC; }
-                QDateEdit::down-arrow { image: none; }
-                """
-            )
-            date_style = date_dark if self.is_dark_theme else date_light
-            for dname in ['filter_from_date', 'filter_to_date', 'refill_from_date', 'refill_to_date']:
-                d = getattr(self, dname, None)
-                if d is not None:
-                    d.setStyleSheet(date_style)
-
-            # List widgets
-            list_dark = (
-                """
-                QListWidget { background-color: #2B2B2B; border: 1px solid #424242; color: white; }
-                QListWidget::item:selected { background-color: #404040; color: white; }
-                """
-            )
-            list_light = (
-                """
-                QListWidget { background-color: #FFFFFF; border: 1px solid #CCCCCC; color: black; }
-                QListWidget::item:selected { background-color: #CDE8FF; color: black; }
-                """
-            )
-            lw_style = list_dark if self.is_dark_theme else list_light
-            for lname in ['file_list_widget', 'patient_list']:
-                lw = getattr(self, lname, None)
-                if lw is not None:
-                    lw.setStyleSheet(lw_style)
+            # All widget styles (tables, lists, inputs, dates) are handled by global QSS
 
             # Update checkbox delegates to match theme
             try:
@@ -18233,16 +18281,6 @@ class PDFViewer(QMainWindow):
             return
         
         menu = QMenu(self)
-        menu.setStyleSheet("""
-            QMenu {
-                background-color: #2B2B2B;
-                color: white;
-                border: 1px solid #424242;
-            }
-            QMenu::item:selected {
-                background-color: #404040;
-            }
-        """)
         
         rename_action = menu.addAction("✏️ Rename File")
         move_action = menu.addAction("📁 Move to Subfolder")
@@ -20288,9 +20326,9 @@ class PDFViewer(QMainWindow):
                     item.setText(3, match_text)
                     item.setText(4, match_type)
                     
-                    # 🔹 ensure text is visible on dark background
+                    # 🔹 ensure text is visible on light background
                     for col in range(5):
-                        item.setForeground(col, QBrush(QColor("#f0f0f0")))
+                        item.setForeground(col, QBrush(QColor("#1e293b")))
                     
                     # Store full result on first column for later use
                     item.setData(0, Qt.ItemDataRole.UserRole, result)
@@ -20468,8 +20506,19 @@ class PDFViewer(QMainWindow):
         except Exception:
             pass
 
+    def on_search_result_selection_changed(self, current, previous):
+        """Handle selection change in search results tree - fires on every click."""
+        if current is None:
+            return
+        try:
+            result = current.data(0, Qt.ItemDataRole.UserRole)
+            if result:
+                self.open_search_result(result)
+        except Exception as e:
+            print(f"Error on search result selection: {e}")
+
     def on_search_result_row_activated(self, item, column):
-        """Open a search result when activated from the results table."""
+        """Open a search result when activated (Enter key / double-click)."""
         try:
             result = item.data(0, Qt.ItemDataRole.UserRole)
             if result:
@@ -20516,9 +20565,53 @@ class PDFViewer(QMainWindow):
                 self.current_page_num = page
                 if hasattr(self, 'render_page'):
                     self.render_page()
+
+            # Scroll file list to matching file
+            self._scroll_file_list_to(filename or (os.path.basename(full_path) if full_path else None))
         except Exception as e:
             print(f"Error opening search result: {e}")
             pass
+
+    def _scroll_file_list_to(self, filename):
+        """Select and scroll the file list widget to the given filename.
+        
+        Blocks currentItemChanged so on_file_selected doesn't re-load the PDF.
+        If the file is not found in the list, clears the current selection.
+        """
+        if not hasattr(self, 'file_list_widget'):
+            return
+        try:
+            self.file_list_widget.blockSignals(True)
+            if not filename:
+                self.file_list_widget.setCurrentRow(-1)
+                self.file_list_widget.blockSignals(False)
+                return
+            base = os.path.basename(filename)
+            base_lower = base.lower()
+            for row in range(self.file_list_widget.count()):
+                item = self.file_list_widget.item(row)
+                if not item:
+                    continue
+                item_text = item.text()
+                # Strip star prefix (★ ) if present
+                clean = item_text.lstrip('\u2605 ')
+                if (item_text == base or item_text == filename
+                        or clean == base
+                        or item_text.lower() == base_lower
+                        or clean.lower() == base_lower):
+                    self.file_list_widget.setCurrentRow(row)
+                    self.file_list_widget.blockSignals(False)
+                    self.file_list_widget.scrollToItem(
+                        item, QAbstractItemView.ScrollHint.PositionAtCenter)
+                    return
+            # File not found in list - clear selection
+            self.file_list_widget.setCurrentRow(-1)
+            self.file_list_widget.blockSignals(False)
+        except Exception:
+            try:
+                self.file_list_widget.blockSignals(False)
+            except Exception:
+                pass
     
     def _find_document_by_name(self, filename: str):
         """Last-resort fallback: search current OCR root + subfolders for filename."""
@@ -29234,39 +29327,6 @@ class PDFViewer(QMainWindow):
         combo.setEditable(True)
         combo.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
         
-        # Style the combo box
-        combo.setStyleSheet("""
-            QComboBox {
-                background-color: #3C3C3C;
-                border: 1px solid #555555;
-                border-radius: 4px;
-                padding: 5px;
-                color: white;
-                font-size: 12px;
-            }
-            QComboBox:focus {
-                border: 2px solid #0078D4;
-            }
-            QComboBox::drop-down {
-                border: none;
-                background-color: #424242;
-                width: 20px;
-            }
-            QComboBox::down-arrow {
-                image: none;
-                border-left: 5px solid transparent;
-                border-right: 5px solid transparent;
-                border-top: 5px solid white;
-                margin: 5px;
-            }
-            QComboBox QAbstractItemView {
-                background-color: #2B2B2B;
-                border: 1px solid #424242;
-                selection-background-color: #0078D4;
-                color: white;
-            }
-        """)
-        
         # Load existing insurance names
         self.load_insurance_names(combo)
         
@@ -29276,7 +29336,7 @@ class PDFViewer(QMainWindow):
             line_edit.textChanged.connect(lambda text: self.convert_combo_to_uppercase(combo, text))
         
         return combo
-    
+
     def convert_combo_to_uppercase(self, combo, text):
         """Convert combo box text to uppercase."""
         if text != text.upper():
@@ -29285,7 +29345,7 @@ class PDFViewer(QMainWindow):
             cursor_pos = line_edit.cursorPosition()
             combo.setEditText(text.upper())
             line_edit.setCursorPosition(cursor_pos)
-    
+
     def load_insurance_names(self, combo):
         """Load insurance names from database into combo box."""
         try:
@@ -29310,7 +29370,7 @@ class PDFViewer(QMainWindow):
             
         except Exception as e:
             print(f"Error loading insurance names: {e}")
-    
+
     def save_insurance_name(self, name):
         """Save insurance name to database or increment usage count."""
         if not name or not name.strip():
@@ -34000,7 +34060,6 @@ class PDFViewer(QMainWindow):
 
         # Table
         self.fee_table = QTableWidget(0, 0)
-        self.fee_table.setStyleSheet("QTableWidget { background-color: #2B2B2B; color: white; }")
         self.fee_table.setWordWrap(True)
         layout.addWidget(self.fee_table)
 
@@ -34020,7 +34079,7 @@ class PDFViewer(QMainWindow):
         # Initial load
         self.refresh_fee_schedule()
 
-        self.main_tabs.addTab(fee_tab, "💲 Fee Schedule")
+        self.main_tabs.addTab(fee_tab, "Fee Schedule")
 
     # -------------------- Queues Tab (Full CRUD Management) --------------------
     def create_queues_tab(self):
@@ -34066,7 +34125,6 @@ class PDFViewer(QMainWindow):
         left_layout.addLayout(queue_controls)
         
         self.queues_list = QListWidget()
-        self.queues_list.setStyleSheet("QListWidget{background-color:#2B2B2B;color:white;font-size:13px}")
         self.queues_list.currentItemChanged.connect(self.on_queue_selected)
         left_layout.addWidget(self.queues_list)
         
@@ -34103,7 +34161,6 @@ class PDFViewer(QMainWindow):
         self.queue_items_table = QTableWidget(0, 7)
         self.queue_items_table.setHorizontalHeaderLabels(["Order ID", "Patient", "Order Date", "Status", "Priority", "Assigned To", "Notes"])
         self.queue_items_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
-        self.queue_items_table.setStyleSheet("QTableWidget{background-color:#2B2B2B;color:white}")
         self.queue_items_table.itemSelectionChanged.connect(self.on_queue_item_selected)
         self.queue_items_table.itemDoubleClicked.connect(self.open_order_from_queue)
         right_layout.addWidget(self.queue_items_table)
@@ -34119,7 +34176,7 @@ class PDFViewer(QMainWindow):
         
         main_layout.addWidget(splitter)
         
-        self.main_tabs.addTab(queues_tab, "📥 Queues")
+        self.main_tabs.addTab(queues_tab, "Queues")
         self.load_queues_list()
 
     def load_queues_list(self):
@@ -34454,7 +34511,6 @@ class PDFViewer(QMainWindow):
         results_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         results_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         results_table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
-        results_table.setStyleSheet("QTableWidget{background-color:#2B2B2B;color:white}")
         layout.addWidget(results_table)
 
         result_status = QLabel("Enter a search term to find an order.")
@@ -34744,7 +34800,6 @@ class PDFViewer(QMainWindow):
         self.tasks_table = QTableWidget(0, 8)
         self.tasks_table.setHorizontalHeaderLabels(["ID","✓","Priority","Due Date","Title","Patient","Assigned To","Status"])
         self.tasks_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
-        self.tasks_table.setStyleSheet("QTableWidget{background-color:#2B2B2B;color:white}")
         self.tasks_table.itemDoubleClicked.connect(self.edit_selected_task)
         self.tasks_table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.tasks_table.customContextMenuRequested.connect(self.show_tasks_context_menu)
@@ -34754,7 +34809,7 @@ class PDFViewer(QMainWindow):
         self.tasks_status_label.setStyleSheet("color:#888;padding:4px")
         layout.addWidget(self.tasks_status_label)
 
-        self.main_tabs.addTab(tasks_tab, "✅ Tasks")
+        self.main_tabs.addTab(tasks_tab, "Tasks")
         self.load_tasks_table()
 
     def load_tasks_table(self):
@@ -35348,8 +35403,11 @@ class PDFViewer(QMainWindow):
             self.total_pages = self.doc.page_count if hasattr(self.doc, "page_count") else len(self.doc)
             self.current_page_num = 0
 
-            # Render first page
+            # Render first page – fit to viewer width
+            self.zoom_level = 1.0
             self.render_page()
+            from PyQt6.QtCore import QTimer
+            QTimer.singleShot(50, self.fit_width)
 
             # Update label
             self.update_page_navigation()
@@ -35415,7 +35473,10 @@ class PDFViewer(QMainWindow):
             self.current_file = os.path.basename(full_path)
             self.current_pdf_path = full_path
             self.pdf_document = self.doc
+            self.zoom_level = 1.0
             self.render_page()
+            from PyQt6.QtCore import QTimer
+            QTimer.singleShot(50, self.fit_width)
             self.update_page_navigation()
             self.statusBar().showMessage(f"Loaded: {self.current_file} ({len(self.doc)} pages)")
         except Exception as e:
@@ -35723,7 +35784,7 @@ class PDFViewer(QMainWindow):
         
         layout.addLayout(action_layout)
         
-        self.main_tabs.addTab(icd_tab, "🔍 ICD-10")
+        self.main_tabs.addTab(icd_tab, "ICD-10")
     
     def perform_icd10_tab_search(self):
         """Perform ICD-10 search from the dedicated tab"""
@@ -36199,6 +36260,7 @@ class PDFViewer(QMainWindow):
     
     def open_epaces_helper(self):
         """Open the ePACES billing helper dialog for the selected order."""
+        print("[EPACES] open_epaces_helper called!")
         current_row = self.orders_table.currentRow()
         if current_row < 0:
             QMessageBox.warning(self, "ePACES", "Please select an order first.")
@@ -36226,6 +36288,41 @@ class PDFViewer(QMainWindow):
                 folder_path=self.folder_path,
                 parent=self
             )
+
+            # ── Check if this order has an RX on File ──
+            try:
+                from reserved_rx_manager import get_reserved_rx_data
+                db_path = getattr(self, 'orders_db_path', None) or os.path.join(self.folder_path, "orders.db")
+                print(f"[RX check] order_id={order_id}, db_path={db_path}")
+                rx_data = get_reserved_rx_data(db_path, str(order_id))
+                print(f"[RX check] rx_data={rx_data}")
+                if rx_data and int(rx_data.get("rx_on_file", 0)):
+                    md_name = rx_data.get("reserved_rx_md", "") or "Unknown"
+                    rx_date = rx_data.get("reserved_rx_date", "") or "N/A"
+                    rx_doc  = rx_data.get("reserved_rx_path", "") or ""
+                    doc_display = os.path.basename(rx_doc) if rx_doc else "—"
+
+                    alert = QMessageBox(dialog)
+                    alert.setIcon(QMessageBox.Icon.Information)
+                    alert.setWindowTitle("RX Already on File")
+                    alert.setText(
+                        f"<b>This patient already has an RX on file.</b><br>"
+                        f"<b>Do NOT contact the prescriber again.</b>"
+                    )
+                    alert.setInformativeText(
+                        f"<table style='font-size:12px;'>"
+                        f"<tr><td><b>Prescriber:</b></td><td>&nbsp;{md_name}</td></tr>"
+                        f"<tr><td><b>Date Received:</b></td><td>&nbsp;{rx_date}</td></tr>"
+                        f"<tr><td><b>Document:</b></td><td>&nbsp;{doc_display}</td></tr>"
+                        f"</table>"
+                    )
+                    alert.setStandardButtons(QMessageBox.StandardButton.Ok)
+                    alert.exec()
+            except Exception as e:
+                print(f"[RX on File check] ERROR: {e}")
+                import traceback
+                traceback.print_exc()
+
             dialog.exec()
         except Exception as e:
             QMessageBox.critical(

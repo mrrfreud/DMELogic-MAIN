@@ -736,32 +736,37 @@ QListWidget::item:selected {{
 ══════════════════════════════════════════════════════════════════ */
 
 QTabWidget::pane {{
-    border: 1px solid {C.SLATE_200};
-    border-top: none;
+    border: none;
+    border-top: 1px solid {C.SLATE_200};
     background: {C.WHITE};
-    border-radius: 0 0 6px 6px;
+}}
+QTabWidget::tab-bar {{
+    alignment: left;
+}}
+QTabBar {{
+    background-color: {C.WHITE};
 }}
 QTabBar::tab {{
-    background: {C.SLATE_100};
-    color: {C.TEXT_SECONDARY};
-    padding: 7px 16px;
-    border: 1px solid {C.SLATE_200};
-    border-bottom: none;
-    border-radius: 5px 5px 0 0;
-    margin-right: 2px;
-    font-size: 12px;
-    font-weight: 500;
+    background-color: #161d2c;
+    color: #93c5fd;
+    border: 1px solid #253550;
+    border-radius: 5px;
+    padding: 5px 12px;
+    margin: 4px 2px 4px 2px;
+    font-size: 9pt;
+    font-weight: 600;
+    min-width: 60px;
+    min-height: 26px;
 }}
 QTabBar::tab:hover {{
-    background: {C.SLATE_200};
-    color: {C.TEXT_PRIMARY};
+    color: #bfdbfe;
+    background-color: #1e293b;
+    border-color: #3b82f6;
 }}
 QTabBar::tab:selected {{
-    background: {C.WHITE};
-    color: {C.TEAL};
-    font-weight: 600;
-    border-bottom: 2px solid {C.WHITE};
-    margin-bottom: -1px;
+    color: #3b82f6;
+    background-color: #0f172a;
+    border-color: #3b82f6;
 }}
 
 /* ══════════════════════════════════════════════════════════════════

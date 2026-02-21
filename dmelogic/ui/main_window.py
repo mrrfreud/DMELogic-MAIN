@@ -15,7 +15,8 @@ import subprocess
 from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
     QLineEdit, QComboBox, QLabel, QPushButton, 
-    QFrame, QSizePolicy, QDialog, QMessageBox, QTableWidget, QToolBar, QApplication, QFileDialog, QScrollArea
+    QFrame, QSizePolicy, QDialog, QMessageBox, QTableWidget, QToolBar, QApplication, QFileDialog, QScrollArea,
+    QSlider, QWidgetAction
 )
 from PyQt6.QtGui import QIcon, QAction
 from PyQt6.QtCore import QSize, Qt
@@ -98,7 +99,7 @@ def build_orders_tab(self) -> QWidget:
 
     # -- Top section: summary + primary row of buttons --
     top_section = QHBoxLayout()
-    top_section.setSpacing(8)
+    top_section.setSpacing(6)
 
     # Summary labels (left)
     self.orders_summary_label = QLabel("No order selected")
@@ -114,34 +115,73 @@ def build_orders_tab(self) -> QWidget:
 
     top_section.addLayout(summary_layout, 3)
 
-    def _make_btn(label: str, tooltip: str) -> QPushButton:
+    # --- Crisp action buttons (no emoji — pure text for sharp rendering) ---
+    _ACTION_BTN_STYLE = """
+        QPushButton {{
+            font-size: {fsize}pt; font-weight: 600;
+            padding: 5px 12px; min-height: 26px;
+            border-radius: 5px;
+            border: 1px solid {border};
+            background-color: {bg};
+            color: {fg};
+        }}
+        QPushButton:hover {{
+            background-color: {hover_bg};
+            border-color: {hover_border};
+            color: {hover_fg};
+        }}
+        QPushButton:pressed {{
+            background-color: {press_bg};
+        }}
+    """
+
+    def _make_action_btn(label: str, tooltip: str,
+                         fg: str = "#cbd5e1", bg: str = "#161d2c",
+                         border: str = "#253550",
+                         hover_bg: str = "#1e293b", hover_border: str = "#3b82f6",
+                         hover_fg: str = "#f1f5f9",
+                         press_bg: str = "#0f172a",
+                         accent: str | None = None) -> QPushButton:
         btn = QPushButton(label)
         btn.setToolTip(tooltip)
+        if accent:
+            fg = accent
+            hover_fg = accent
+        btn.setStyleSheet(_ACTION_BTN_STYLE.format(
+            fsize=9, fg=fg, bg=bg, border=border,
+            hover_bg=hover_bg, hover_border=hover_border,
+            hover_fg=hover_fg, press_bg=press_bg,
+        ))
         return btn
 
-    # Primary row buttons
+    # Primary row buttons — each with a distinct accent colour for scannability
     row1_defs = [
-        ("edit_order", "✏️ Edit Order", "Edit the selected order"),
-        ("update_status", "🔄 Update Status", "Update order status"),
-        ("delivery_report", "📊 Delivery Report", "View delivery report"),
-        ("clear_delivery", "🧹 Clear Delivery", "Set delivery date to blank for the selected order"),
-        ("process_refill", "♻️ Process Refill", "Create a new order as a refill of the selected one"),
-        ("reverse_refill", "↩️ Reverse Refill", "Undo a refill: restore refills to parent and delete the refill order"),
-        ("refill_request", "📋 Refill Request", "Generate a fax to request new prescriptions from the provider"),
-        ("batch_delivered", "📦 Batch Delivered", "Mark multiple selected orders as delivered"),
-        ("batch_billed", "💰 Batch Billed", "Mark multiple selected orders as billed/paid"),
+        ("edit_order",      "Edit Order",       "Edit the selected order",                                        "#3b82f6"),  # blue
+        ("update_status",   "Update Status",    "Update order status",                                            "#6366f1"),  # indigo
+        ("delivery_report", "Delivery Report",  "View delivery report",                                           "#8b5cf6"),  # violet
+        ("clear_delivery",  "Clear Delivery",   "Set delivery date to blank for the selected order",              "#94a3b8"),  # slate
+        ("process_refill",  "Process Refill",   "Create a new order as a refill of the selected one",             "#22c55e"),  # green
+        ("reverse_refill",  "Reverse Refill",   "Undo a refill: restore refills to parent and delete the refill", "#14b8a6"),  # teal
+        ("refill_request",  "Refill Request",   "Generate a fax to request new prescriptions from the provider",  "#0ea5e9"),  # sky
+        ("batch_delivered", "Batch Delivered",   "Mark multiple selected orders as delivered",                     "#f59e0b"),  # amber
+        ("batch_billed",    "Batch Billed",     "Mark multiple selected orders as billed/paid",                   "#f97316"),  # orange
     ]
 
     created = {}
-    for key, text, tip in row1_defs:
-        btn = _make_btn(text, tip)
+    for key, text, tip, accent in row1_defs:
+        btn = _make_action_btn(text, tip, accent=accent)
         created[key] = btn
         top_section.addWidget(btn)
 
     # Expand/collapse arrow button
-    self._orders_more_btn = QPushButton("▼ More")
+    self._orders_more_btn = QPushButton("More ▼")
     self._orders_more_btn.setToolTip("Show / hide additional action buttons")
-    self._orders_more_btn.setFixedWidth(70)
+    self._orders_more_btn.setStyleSheet(_ACTION_BTN_STYLE.format(
+        fsize=9, fg="#e2e8f0", bg="#1e293b", border="#334155",
+        hover_bg="#334155", hover_border="#3b82f6",
+        hover_fg="#f8fafc", press_bg="#0f172a",
+    ))
+    self._orders_more_btn.setFixedWidth(72)
     top_section.addWidget(self._orders_more_btn)
 
     bottom_vbox.addLayout(top_section)
@@ -154,18 +194,18 @@ def build_orders_tab(self) -> QWidget:
     row2_layout.addStretch(1)
 
     row2_defs = [
-        ("export_portal", "📤 Export to Portal", "Export order to state portal (CSV/JSON)"),
-        ("epaces", "🔐 Bill in ePACES", "Open copy-friendly helper for manual ePACES portal entry"),
-        ("print_delivery_ticket", "🎫 Print Delivery Ticket", "Generate delivery ticket PDF for the selected order"),
-        ("generate_1500", "📄 Generate 1500 JSON", "Generate HCFA-1500 claim data (JSON preview)"),
-        ("print_1500", "🖨️ Print HCFA-1500", "Generate and print CMS-1500 claim form (PDF)"),
-        ("delete_order", "🗑️ Delete Order", "Delete the selected order"),
-        ("link_patient", "🔗 Link to Patient", "Link order to a patient"),
-        ("import_rx", "📥 Import Rx → Order", "Upload Rx PDF(s) and auto-create an order"),
+        ("export_portal",        "Export to Portal",     "Export order to state portal (CSV/JSON)",                       "#a78bfa"),  # violet
+        ("epaces",               "Bill in ePACES",       "Open copy-friendly helper for manual ePACES portal entry",      "#6366f1"),  # indigo
+        ("print_delivery_ticket","Print Delivery Ticket","Generate delivery ticket PDF for the selected order",           "#38bdf8"),  # sky
+        ("generate_1500",        "Generate 1500 JSON",   "Generate HCFA-1500 claim data (JSON preview)",                  "#22d3ee"),  # cyan
+        ("print_1500",           "Print HCFA-1500",      "Generate and print CMS-1500 claim form (PDF)",                  "#2dd4bf"),  # teal
+        ("delete_order",         "Delete Order",         "Delete the selected order",                                     "#ef4444"),  # red
+        ("link_patient",         "Link to Patient",      "Link order to a patient",                                       "#a3e635"),  # lime
+        ("import_rx",            "Import Rx to Order",   "Upload Rx PDF(s) and auto-create an order",                     "#fb923c"),  # orange
     ]
 
-    for key, text, tip in row2_defs:
-        btn = _make_btn(text, tip)
+    for key, text, tip, accent in row2_defs:
+        btn = _make_action_btn(text, tip, accent=accent)
         created[key] = btn
         row2_layout.addWidget(btn)
 
@@ -177,7 +217,7 @@ def build_orders_tab(self) -> QWidget:
     def _toggle_more():
         showing = not self._orders_row2.isVisible()
         self._orders_row2.setVisible(showing)
-        self._orders_more_btn.setText("▲ Less" if showing else "▼ More")
+        self._orders_more_btn.setText("Less ▲" if showing else "More ▼")
     self._orders_more_btn.clicked.connect(_toggle_more)
 
     main_layout.addWidget(bottom_frame, 0)
@@ -385,6 +425,8 @@ class MainWindow(PDFViewer):
             self.showMaximized()  # Start maximized to avoid layout squeeze
         except Exception:
             pass
+        self._ui_scale_slider = None
+        self._ui_scale_value_label = None
         
         # Setup theme switching menu
         self._setup_theme_menu()
@@ -655,6 +697,96 @@ class MainWindow(PDFViewer):
         
         view_menu.addAction(self.action_light_theme)
         view_menu.addAction(self.action_dark_theme)
+        self._add_ui_scale_controls(view_menu)
+
+    def _add_ui_scale_controls(self, view_menu) -> None:
+        """Inject slider-based UI scale controls into the View menu."""
+        if view_menu is None:
+            return
+
+        view_menu.addSeparator()
+        container = QWidget(view_menu)
+        layout = QHBoxLayout(container)
+        layout.setContentsMargins(8, 6, 8, 6)
+        layout.setSpacing(8)
+
+        title_label = QLabel("UI Scale", container)
+        title_label.setMinimumWidth(60)
+
+        slider = QSlider(Qt.Orientation.Horizontal, container)
+        slider.setRange(80, 150)
+        slider.setTickInterval(10)
+        slider.setSingleStep(5)
+        slider.setTickPosition(QSlider.TickPosition.TicksBelow)
+        slider.setMinimumWidth(160)
+
+        value_label = QLabel("100%", container)
+        value_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        value_label.setMinimumWidth(48)
+
+        layout.addWidget(title_label)
+        layout.addWidget(slider, 1)
+        layout.addWidget(value_label)
+
+        widget_action = QWidgetAction(self)
+        widget_action.setDefaultWidget(container)
+        view_menu.addAction(widget_action)
+
+        reset_action = QAction("Reset UI Scale (100%)", self)
+        reset_action.setToolTip("Restore default sizing for all controls")
+        reset_action.triggered.connect(lambda: slider.setValue(100))
+        view_menu.addAction(reset_action)
+
+        self._ui_scale_slider = slider
+        self._ui_scale_value_label = value_label
+
+        initial_value = self._load_saved_ui_scale()
+        slider.blockSignals(True)
+        slider.setValue(initial_value)
+        slider.blockSignals(False)
+        self._update_ui_scale_label(initial_value)
+        self._apply_ui_scale(initial_value)
+
+        slider.valueChanged.connect(self._handle_ui_scale_changed)
+
+    def _load_saved_ui_scale(self) -> int:
+        settings = getattr(self, "settings", None)
+        if isinstance(settings, dict):
+            try:
+                value = int(settings.get("ui_scale", 100))
+            except Exception:
+                value = 100
+        else:
+            value = 100
+        return max(80, min(150, value))
+
+    def _update_ui_scale_label(self, value: int) -> None:
+        if self._ui_scale_value_label is not None:
+            self._ui_scale_value_label.setText(f"{value}%")
+
+    def _handle_ui_scale_changed(self, value: int) -> None:
+        clamped = max(80, min(150, int(value)))
+        self._update_ui_scale_label(clamped)
+        self._apply_ui_scale(clamped)
+        settings = getattr(self, "settings", None)
+        if isinstance(settings, dict):
+            settings["ui_scale"] = clamped
+            try:
+                self.save_settings()
+            except Exception:
+                pass
+
+    def _apply_ui_scale(self, scale_percent: int) -> None:
+        app = QApplication.instance()
+        if not app:
+            return
+        ThemeManager.apply_scale(app, scale_percent)
+        icon_px = max(16, int(20 * scale_percent / 100))
+        for toolbar in self.findChildren(QToolBar):
+            try:
+                toolbar.setIconSize(QSize(icon_px, icon_px))
+            except Exception:
+                pass
 
     def _setup_tools_menu(self) -> None:
         """Add Tools menu and toolbar entry for sticky notes and user administration."""
@@ -697,11 +829,6 @@ class MainWindow(PDFViewer):
         self.action_change_password.setToolTip("Change your password")
         self.action_change_password.triggered.connect(self._open_change_password)
         tools_menu.addAction(self.action_change_password)
-
-        toolbar = QToolBar("Tools", self)
-        toolbar.setIconSize(QSize(20, 20))
-        toolbar.addAction(self.action_sticky_notes)
-        self.addToolBar(Qt.ToolBarArea.TopToolBarArea, toolbar)
     
     def _open_user_admin(self) -> None:
         """Open the User Administration dialog."""

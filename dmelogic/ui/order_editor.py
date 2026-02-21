@@ -135,12 +135,16 @@ class OrderEditorDialog(QDialog):
         self.setWindowTitle("Order Editor")
         self.setWindowFlags(self.windowFlags() | Qt.WindowType.WindowMinMaxButtonsHint)
         self.setMinimumSize(1200, 800)
+        self.resize(1280, 850)
         
         # Main layout with splitter
         main_layout = QVBoxLayout(self)
+        main_layout.setContentsMargins(8, 4, 8, 8)
+        main_layout.setSpacing(4)
         
-        # Header with order ID and status
+        # Header with order ID and status (compact, non-stretching)
         header = self._create_header()
+        header.setFixedHeight(40)
         main_layout.addWidget(header)
         
         # Splitter: Left (order details) | Right (actions)
@@ -150,14 +154,20 @@ class OrderEditorDialog(QDialog):
         left_panel = self._create_order_details_panel()
         splitter.addWidget(left_panel)
         
-        # Right side: Action buttons
+        # Right side: Action buttons (scrollable)
+        right_scroll = QScrollArea()
+        right_scroll.setWidgetResizable(True)
+        right_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        right_scroll.setMinimumWidth(320)
         right_panel = self._create_actions_panel()
-        splitter.addWidget(right_panel)
+        right_scroll.setWidget(right_panel)
+        splitter.addWidget(right_scroll)
         
-        splitter.setStretchFactor(0, 3)  # Order details take 75%
-        splitter.setStretchFactor(1, 1)  # Actions take 25%
+        splitter.setStretchFactor(0, 3)  # Order details take ~60%
+        splitter.setStretchFactor(1, 2)  # Actions take ~40%
+        splitter.setSizes([700, 480])  # Explicit initial sizes
         
-        main_layout.addWidget(splitter)
+        main_layout.addWidget(splitter, 1)  # Give splitter all remaining stretch
         
         # Bottom buttons
         button_layout = QHBoxLayout()
@@ -181,7 +191,7 @@ class OrderEditorDialog(QDialog):
         header = QFrame()
         header.setProperty("class", "section-header")
         layout = QHBoxLayout(header)
-        layout.setContentsMargins(10, 10, 10, 10)
+        layout.setContentsMargins(10, 4, 10, 4)
         
         # Order ID
         self.order_id_label = QLabel(f"Order #: {self._format_order_number()}")
@@ -582,10 +592,12 @@ class OrderEditorDialog(QDialog):
         self.docs_list.setColumnCount(3)
         self.docs_list.setHorizontalHeaderLabels(["Filename", "Type", ""])
         self.docs_list.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
-        self.docs_list.setMaximumHeight(100)
+        self.docs_list.setMinimumHeight(120)
+        self.docs_list.setMaximumHeight(200)
         self.docs_list.verticalHeader().setVisible(False)
         docs_hdr = self.docs_list.horizontalHeader()
         docs_hdr.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        docs_hdr.setMinimumSectionSize(150)
         docs_hdr.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
         docs_hdr.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
         self.docs_list.doubleClicked.connect(self._open_selected_document)
@@ -1876,17 +1888,31 @@ class OrderEditorDialog(QDialog):
         if not self.order:
             return
         
-        self._refresh_documents_list()
-        
+        # Check selection before refresh (refresh clears selection)
         row = self.docs_list.currentRow()
         if row >= 0:
             self._open_selected_document()
-        elif self.docs_list.rowCount() == 0:
+            return
+        
+        # No selection — refresh list and check if there are any docs
+        self._refresh_documents_list()
+        
+        if self.docs_list.rowCount() == 0:
             QMessageBox.information(
                 self,
                 "No Documents",
                 "No documents attached to this order.\n\n"
                 "Click 'Attach' to add documents."
+            )
+        elif self.docs_list.rowCount() == 1:
+            # Only one document — open it directly
+            self.docs_list.selectRow(0)
+            self._open_selected_document()
+        else:
+            QMessageBox.information(
+                self,
+                "Select a Document",
+                "Select a document from the list, then click View to open it."
             )
     
     def _attach_document(self):
@@ -2301,6 +2327,7 @@ class OrderEditorDialog(QDialog):
                 folder_path=self.folder_path,
                 parent=self
             )
+            self._show_rx_on_file_alert(dialog)
             dialog.exec()
         except Exception as e:
             QMessageBox.critical(
@@ -2334,6 +2361,7 @@ class OrderEditorDialog(QDialog):
                 folder_path=self.folder_path,
                 parent=self
             )
+            self._show_rx_on_file_alert(self._epaces_dialog)
             self._epaces_dialog.show()
             self._epaces_dialog.raise_()
             self._epaces_dialog.activateWindow()
@@ -2344,6 +2372,39 @@ class OrderEditorDialog(QDialog):
                 f"Failed to open ePACES helper:\n{e}"
             )
     
+    def _show_rx_on_file_alert(self, parent_dialog):
+        """Show an alert if this order has an RX on File."""
+        try:
+            import os
+            from reserved_rx_manager import get_reserved_rx_data
+            db_path = self.orders_db_path
+            order_id = str(self.order.id)
+            rx_data = get_reserved_rx_data(db_path, order_id)
+            if rx_data and int(rx_data.get("rx_on_file", 0)):
+                md_name = rx_data.get("reserved_rx_md", "") or "Unknown"
+                rx_date = rx_data.get("reserved_rx_date", "") or "N/A"
+                rx_doc  = rx_data.get("reserved_rx_path", "") or ""
+                doc_display = os.path.basename(rx_doc) if rx_doc else "—"
+
+                alert = QMessageBox(parent_dialog)
+                alert.setIcon(QMessageBox.Icon.Information)
+                alert.setWindowTitle("RX Already on File")
+                alert.setText(
+                    "<b>This patient already has an RX on file.</b><br>"
+                    "<b>Do NOT contact the prescriber again.</b>"
+                )
+                alert.setInformativeText(
+                    f"<table style='font-size:12px;'>"
+                    f"<tr><td><b>Prescriber:</b></td><td>&nbsp;{md_name}</td></tr>"
+                    f"<tr><td><b>Date Received:</b></td><td>&nbsp;{rx_date}</td></tr>"
+                    f"<tr><td><b>Document:</b></td><td>&nbsp;{doc_display}</td></tr>"
+                    f"</table>"
+                )
+                alert.setStandardButtons(QMessageBox.StandardButton.Ok)
+                alert.exec()
+        except Exception as e:
+            print(f"[RX on File check] {e}")
+
     def _change_prescriber(self):
         """Open prescriber lookup dialog to change prescriber."""
         if not self.order:

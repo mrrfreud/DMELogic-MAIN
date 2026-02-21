@@ -113,13 +113,20 @@ def main():
         pass
     
     # Enable High DPI scaling for sharp fonts and modern appearance
-    # Note: Qt6 has High DPI enabled by default, just set the rounding policy
+    # Round to nearest integer scale factor for crisp text rendering
     QApplication.setHighDpiScaleFactorRoundingPolicy(
-        Qt.HighDpiScaleFactorRoundingPolicy.PassThrough
+        Qt.HighDpiScaleFactorRoundingPolicy.Round
     )
     
     logging.info("Creating QApplication...")
     app = QApplication(sys.argv)
+    
+    # Force full-pixel hinting for sharp text on all monitors
+    from PyQt6.QtGui import QFont
+    default_font = app.font()
+    default_font.setHintingPreference(QFont.HintingPreference.PreferFullHinting)
+    default_font.setStyleStrategy(QFont.StyleStrategy.PreferAntialias)
+    app.setFont(default_font)
     
     # Apply DMELogic design system theme
     try:
