@@ -948,8 +948,9 @@ class InboxDialog(QDialog):
         prefix = 'fax' if msg_type == 'fax' else 'message'
         default_name = f"{prefix}_{from_number}_{datetime.now().strftime('%Y%m%d_%H%M%S')}{ext}"
         
-        # Use default inbox download folder
-        default_folder = r"c:\FaxManagerData\FaxManagerData\Faxes OCR'd"
+        # Use default inbox download folder (configured OCR folder)
+        from dmelogic.paths import ocr_folder
+        default_folder = str(ocr_folder())
         os.makedirs(default_folder, exist_ok=True)
         default_path = os.path.join(default_folder, default_name)
         

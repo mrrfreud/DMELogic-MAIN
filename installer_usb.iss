@@ -3,7 +3,7 @@
 ; First run will prompt user to configure server folder locations
 
 #define MyAppName "DMELogic"
-#define MyAppVersion "2.0.20.152"
+#define MyAppVersion "2.0.20.192"
 #define MyAppPublisher "DME Solutions"
 #define MyAppExeName "DMELogic.exe"
 #define MyAppURL "https://github.com/mrrfreud/DMELogic-Refactored"
@@ -57,6 +57,9 @@ Source: "assets\*"; DestDir: "{app}\assets"; Flags: ignoreversion recursesubdirs
 ; Theme files
 Source: "theme\*"; DestDir: "{app}\theme"; Flags: ignoreversion recursesubdirs createallsubdirs
 
+; Bundled Tesseract OCR (portable runtime — no separate install needed)
+Source: "tesseract_portable\*"; DestDir: "{app}\tesseract_portable"; Flags: ignoreversion recursesubdirs createallsubdirs
+
 [Dirs]
 ; Create local app data directory for logs
 Name: "{localappdata}\DMELogic"; Permissions: users-full
@@ -106,24 +109,31 @@ begin
   InfoMemo.ScrollBars := ssVertical;
   InfoMemo.ReadOnly := True;
   InfoMemo.WordWrap := True;
-  InfoMemo.Lines.Add('FIRST-TIME SETUP WIZARD');
+  InfoMemo.Lines.Add('FIRST-TIME SETUP  -  CONNECTING TO THE SERVER');
   InfoMemo.Lines.Add('');
-  InfoMemo.Lines.Add('When you first launch DMELogic, a setup wizard will guide you through configuring your server connections.');
+  InfoMemo.Lines.Add('When you first launch DMELogic, a setup wizard will ask');
+  InfoMemo.Lines.Add('you to point this workstation to the shared folders on');
+  InfoMemo.Lines.Add('the server PC (PC1).');
   InfoMemo.Lines.Add('');
-  InfoMemo.Lines.Add('You will need to know the paths to:');
+  InfoMemo.Lines.Add('You will need the NETWORK PATHS to these folders:');
   InfoMemo.Lines.Add('');
   InfoMemo.Lines.Add('1. DATABASE FOLDER');
-  InfoMemo.Lines.Add('   Where patient and order databases are stored.');
-  InfoMemo.Lines.Add('   Example: \\SERVER\DMEData\Databases');
+  InfoMemo.Lines.Add('   Contains patient, order, and billing databases.');
+  InfoMemo.Lines.Add('   Server path: C:\ProgramData\DMELogic\Data');
+  InfoMemo.Lines.Add('   Network:     \\SERVER-PC\DMELogic\Data');
   InfoMemo.Lines.Add('');
   InfoMemo.Lines.Add('2. FAX DOCUMENTS FOLDER');
-  InfoMemo.Lines.Add('   Where scanned/faxed documents (PDFs) are stored.');
-  InfoMemo.Lines.Add('   Example: \\SERVER\DMEData\Faxes');
+  InfoMemo.Lines.Add('   Contains all scanned/faxed PDFs.');
+  InfoMemo.Lines.Add('   Server path: C:\FaxManagerData');
+  InfoMemo.Lines.Add('   Network:     \\SERVER-PC\FaxManagerData');
   InfoMemo.Lines.Add('');
-  InfoMemo.Lines.Add('NOTE: Backups run automatically on the SERVER.');
-  InfoMemo.Lines.Add('Client workstations do not need backup configuration.');
+  InfoMemo.Lines.Add('3. BACKUP FOLDER (optional for workstations)');
+  InfoMemo.Lines.Add('   Backups run on the server automatically.');
+  InfoMemo.Lines.Add('   Workstations can leave this blank.');
   InfoMemo.Lines.Add('');
-  InfoMemo.Lines.Add('Please contact your IT administrator if you are unsure about these paths.');
+  InfoMemo.Lines.Add('IMPORTANT: The server PC must have these folders');
+  InfoMemo.Lines.Add('shared on the network before setup. Ask your IT');
+  InfoMemo.Lines.Add('administrator to share them if needed.');
 end;
 
 procedure CurStepChanged(CurStep: TSetupStep);

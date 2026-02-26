@@ -80,6 +80,7 @@ def fetch_active_prescribers(folder_path: Optional[str] = None) -> List[sqlite3.
 def search_prescribers(search_term: str, folder_path: Optional[str] = None) -> List[dict]:
     """
     Search prescribers by name or NPI.
+    Supports 'last,first', 'last first', or single-term searches.
     Returns list of dicts with prescriber info.
     """
     try:
@@ -87,23 +88,41 @@ def search_prescribers(search_term: str, folder_path: Optional[str] = None) -> L
         conn.row_factory = sqlite3.Row
         try:
             cur = conn.cursor()
-            like = f"%{search_term}%"
-            cur.execute(
-                """
-                SELECT id, first_name, last_name, title, npi_number, phone, specialty
-                FROM prescribers
-                WHERE first_name LIKE ? OR last_name LIKE ?
-                   OR (first_name || ' ' || last_name) LIKE ?
-                   OR npi_number LIKE ?
-                ORDER BY last_name, first_name
-                LIMIT 50
-                """,
-                (like, like, like, like)
-            )
+            # Split on comma or whitespace for "last,first" / "last first" input
+            parts = [p.strip() for p in search_term.replace(',', ' ').split() if p.strip()]
+            if len(parts) >= 2:
+                # Two-part search: match last AND first (either order)
+                like1 = f"%{parts[0]}%"
+                like2 = f"%{parts[1]}%"
+                cur.execute(
+                    """
+                    SELECT id, first_name, last_name, title, npi_number, phone, specialty
+                    FROM prescribers
+                    WHERE (last_name LIKE ? AND first_name LIKE ?)
+                       OR (last_name LIKE ? AND first_name LIKE ?)
+                    ORDER BY last_name, first_name
+                    LIMIT 50
+                    """,
+                    (like1, like2, like2, like1)
+                )
+            else:
+                term = parts[0] if parts else search_term.strip()
+                like = f"%{term}%"
+                cur.execute(
+                    """
+                    SELECT id, first_name, last_name, title, npi_number, phone, specialty
+                    FROM prescribers
+                    WHERE first_name LIKE ? OR last_name LIKE ?
+                       OR (first_name || ' ' || last_name) LIKE ?
+                       OR npi_number LIKE ?
+                    ORDER BY last_name, first_name
+                    LIMIT 50
+                    """,
+                    (like, like, like, like)
+                )
             results = []
             for row in cur.fetchall():
                 d = dict(row)
-                # Normalize NPI field for UI
                 d["npi"] = d.get("npi_number") or ""
                 results.append(d)
             return results

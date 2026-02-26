@@ -1231,10 +1231,10 @@ class MainWindow(PDFViewer):
 
     def _process_wizard_attachments(self, order_id: int, attachment_paths: list, folder_path: str = None, patient_id: int = None) -> None:
         """
-        Copy attachment files from wizard to order's document folder and update DB.
+        Store references to attachment files in the order's DB record.
+        Stores filenames only (resolved at runtime via configurable ocr_folder).
         Also auto-links documents to the patient's profile.
         """
-        import shutil
         from pathlib import Path
         import sqlite3
         
@@ -1242,13 +1242,8 @@ class MainWindow(PDFViewer):
             return
             
         try:
-            from dmelogic.paths import fax_root
-            
-            # Create order documents folder
-            order_docs_dir = fax_root() / "OrderDocuments" / f"ORD-{order_id:03d}"
-            order_docs_dir.mkdir(parents=True, exist_ok=True)
-            
-            copied_files = []
+            filenames = []
+            full_paths = []
             original_names = []
             for src_path in attachment_paths:
                 try:
@@ -1257,25 +1252,15 @@ class MainWindow(PDFViewer):
                         print(f"⚠️ Attachment not found: {src_path}")
                         continue
                     
-                    dest = order_docs_dir / src.name
-                    
-                    # Handle duplicate names
-                    counter = 1
-                    while dest.exists():
-                        stem = src.stem
-                        suffix = src.suffix
-                        dest = order_docs_dir / f"{stem}_{counter}{suffix}"
-                        counter += 1
-                    
-                    shutil.copy2(src, dest)
-                    copied_files.append(str(dest))
+                    filenames.append(src.name)
+                    full_paths.append(str(src))
                     original_names.append(src.name)
-                    print(f"✅ Attached: {src.name} → {dest}")
+                    print(f"✅ Linked: {src.name} → order {order_id}")
                 except Exception as e:
-                    print(f"⚠️ Failed to copy attachment {src_path}: {e}")
+                    print(f"⚠️ Failed to link attachment {src_path}: {e}")
             
-            if copied_files:
-                # Update order's attached_rx_files field in DB
+            if filenames:
+                # Update order's attached_rx_files field in DB (filenames only)
                 from dmelogic.db.base import get_connection
                 
                 conn = get_connection("orders.db", folder_path)
@@ -1288,9 +1273,9 @@ class MainWindow(PDFViewer):
                 
                 # Build new list (append to existing if any)
                 if current_files:
-                    all_files = current_files + "\n" + "\n".join(copied_files)
+                    all_files = current_files + ";" + ";".join(filenames)
                 else:
-                    all_files = "\n".join(copied_files)
+                    all_files = ";".join(filenames)
                 
                 cur.execute(
                     "UPDATE orders SET attached_rx_files = ? WHERE id = ?",
@@ -1299,11 +1284,11 @@ class MainWindow(PDFViewer):
                 conn.commit()
                 conn.close()
                 
-                print(f"✅ Attached {len(copied_files)} documents to order {order_id}")
+                print(f"✅ Linked {len(filenames)} documents to order {order_id}")
                 
-                # Auto-attach to patient profile
+                # Auto-attach to patient profile (uses full paths for patient doc storage)
                 if patient_id:
-                    self._auto_attach_to_patient(patient_id, copied_files, original_names, order_id, folder_path)
+                    self._auto_attach_to_patient(patient_id, full_paths, original_names, order_id, folder_path)
                     
         except Exception as e:
             print(f"❌ Error processing wizard attachments: {e}")

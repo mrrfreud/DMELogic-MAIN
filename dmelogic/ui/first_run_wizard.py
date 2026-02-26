@@ -87,15 +87,17 @@ class WelcomePage(QWizardPage):
         # Welcome message
         welcome_label = QLabel(
             "<h3>Welcome!</h3>"
-            "<p>Before you can use DMELogic, we need to configure where your data is stored.</p>"
-            "<p>You will need to specify:</p>"
+            "<p>Before you can use DMELogic, we need to connect this workstation to your server.</p>"
+            "<p>You will need the <b>network paths</b> to the following folders on the <b>server PC</b>:</p>"
             "<ul>"
-            "<li><b>Database Folder</b> - Where patient and order databases are stored</li>"
-            "<li><b>Fax Folder</b> - Where OCR'd fax documents are located</li>"
-            "<li><b>Backup Folder</b> - Where automatic backups will be saved</li>"
+            "<li><b>Database Folder</b> — Patient &amp; order databases<br>"
+            "<code style='color:#0d9488;'>Example: \\\\SERVER-PC\\DMELogic\\Data</code></li>"
+            "<li><b>Fax Documents Folder</b> — Scanned/faxed PDFs<br>"
+            "<code style='color:#0d9488;'>Example: \\\\SERVER-PC\\FaxManagerData</code></li>"
+            "<li><b>Backup Folder</b> — Automatic backups (server only, optional here)</li>"
             "</ul>"
-            "<p>These folders are typically on a <b>shared network drive</b> so all workstations "
-            "can access the same data.</p>"
+            "<p style='color:#d97706;'><b>Important:</b> All workstations must point to the <b>same shared folders</b> "
+            "on the server so everyone works from the same data.</p>"
             "<p>Click <b>Next</b> to continue.</p>"
         )
         welcome_label.setWordWrap(True)
@@ -117,8 +119,11 @@ class DatabaseFolderPage(QWizardPage):
         # Instructions
         info_label = QLabel(
             "<p>The database folder contains the SQLite databases for patients, orders, and inventory.</p>"
-            "<p><b>For shared access:</b> Select a folder on your network server (e.g., <code>\\\\SERVER\\DMEData</code>)</p>"
-            "<p><b>For single PC:</b> You can use a local folder (e.g., <code>C:\\Dme_Solutions\\Data</code>)</p>"
+            "<p><b>Network workstation:</b> Browse to the shared folder on your server:<br>"
+            "<code style='color:#0d9488;'>\\\\SERVER-PC\\DMELogic\\Data</code></p>"
+            "<p><b>Server PC (standalone):</b> Use the local path:<br>"
+            "<code style='color:#0d9488;'>C:\\ProgramData\\DMELogic\\Data</code></p>"
+            "<p style='color:#d97706;'>⚠ All workstations must point to the <b>same folder</b> on the server.</p>"
         )
         info_label.setWordWrap(True)
         info_label.setTextFormat(Qt.TextFormat.RichText)
@@ -246,6 +251,10 @@ class FaxFolderPage(QWizardPage):
         info_label = QLabel(
             "<p>This folder contains the scanned/faxed documents (PDFs) organized by date.</p>"
             "<p>DMELogic will browse these documents to link them to patient orders.</p>"
+            "<p><b>Network workstation:</b> Browse to the shared fax folder on your server:<br>"
+            "<code style='color:#0d9488;'>\\\\SERVER-PC\\FaxManagerData</code></p>"
+            "<p><b>Server PC (standalone):</b> Use the local path:<br>"
+            "<code style='color:#0d9488;'>C:\\FaxManagerData</code></p>"
         )
         info_label.setWordWrap(True)
         info_label.setTextFormat(Qt.TextFormat.RichText)
@@ -347,6 +356,8 @@ class BackupFolderPage(QWizardPage):
         info_label = QLabel(
             "<p>DMELogic automatically backs up your databases. Select a safe location for these backups.</p>"
             "<p><b>Recommendation:</b> Use a different drive or network location for safety.</p>"
+            "<p style='color:#0066cc;'><b>Note:</b> Backups typically only run on the <b>server PC</b>. "
+            "Workstations can leave this blank.</p>"
         )
         info_label.setWordWrap(True)
         info_label.setTextFormat(Qt.TextFormat.RichText)

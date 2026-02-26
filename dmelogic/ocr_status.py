@@ -117,11 +117,32 @@ def check_tesseract_availability() -> tuple[bool, Optional[str]]:
     """
     Check if Tesseract OCR is available.
     
+    Checks in order:
+    1. Bundled portable Tesseract next to the app (for USB installs)
+    2. System-installed Tesseract (default pytesseract behavior)
+    
     Returns:
         tuple: (is_available, path_or_none)
     """
+    import os
+    import sys
     import pytesseract
-    
+
+    # --- Check for bundled portable Tesseract ---
+    # When frozen (PyInstaller), look relative to the executable
+    if getattr(sys, "frozen", False):
+        app_dir = os.path.dirname(sys.executable)
+    else:
+        app_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+    portable_exe = os.path.join(app_dir, "tesseract_portable", "tesseract.exe")
+    if os.path.isfile(portable_exe):
+        pytesseract.pytesseract.tesseract_cmd = portable_exe
+        # Also set TESSDATA_PREFIX so it finds language data
+        tessdata_dir = os.path.join(app_dir, "tesseract_portable", "tessdata")
+        if os.path.isdir(tessdata_dir):
+            os.environ["TESSDATA_PREFIX"] = tessdata_dir
+
     try:
         # Try to get version (will fail if not configured)
         version = pytesseract.get_tesseract_version()
@@ -144,7 +165,8 @@ def check_fts5_availability() -> bool:
         # Try importing pysqlite3 (has FTS5)
         from pysqlite3 import dbapi2 as sqlite3
         conn = sqlite3.connect(":memory:")
-        conn.execute("SELECT fts5_version()")
+        conn.execute("CREATE VIRTUAL TABLE _fts5_test USING fts5(content)")
+        conn.execute("DROP TABLE _fts5_test")
         conn.close()
         return True
     except (ImportError, Exception):
@@ -153,7 +175,8 @@ def check_fts5_availability() -> bool:
     # Fall back to standard sqlite3
     try:
         conn = std_sqlite3.connect(":memory:")
-        conn.execute("SELECT fts5_version()")
+        conn.execute("CREATE VIRTUAL TABLE _fts5_test USING fts5(content)")
+        conn.execute("DROP TABLE _fts5_test")
         conn.close()
         return True
     except Exception:

@@ -38,14 +38,22 @@ from PyQt6.QtWidgets import (
     QStackedWidget, QWidget, QFileDialog, QListWidget, QListWidgetItem,
     QLineEdit, QComboBox, QTableWidget, QTableWidgetItem, QHeaderView,
     QMessageBox, QTextEdit, QGroupBox, QScrollArea, QSizePolicy,
-    QProgressBar, QApplication, QCheckBox,
+    QProgressBar, QApplication, QCheckBox, QSplitter, QSlider,
 )
-from PyQt6.QtCore import Qt, pyqtSignal, QTimer
-from PyQt6.QtGui import QFont, QColor, QBrush
+from PyQt6.QtCore import Qt, pyqtSignal, QTimer, QSize
+from PyQt6.QtGui import QFont, QColor, QBrush, QPixmap, QImage
+
+try:
+    import fitz  # PyMuPDF
+    HAS_FITZ = True
+except ImportError:
+    HAS_FITZ = False
 
 from dmelogic.services.rx_parser import RxParser, ParsedRx
 from dmelogic.services.rx_matcher import RxMatcher, MatchResult, ItemMatchResult
 from dmelogic.db.base import get_connection
+from dmelogic.db.patients import search_patients
+from dmelogic.db.prescribers import search_prescribers
 from dmelogic.db.drug_mappings import DrugMapper
 
 
@@ -112,16 +120,23 @@ class StepBar(QFrame):
 
 
 class ConfirmationCard(QFrame):
-    """Shows a matched record with accept/reject/add-new controls."""
+    """Shows a matched record with accept/reject/add-new/search controls.
+    
+    Built-in DB search panel: call set_search_function(fn) where fn(term)->list[dict].
+    When no match is found the search panel auto-shows.
+    """
 
     confirmed = pyqtSignal(dict)     # user accepted this record
     add_new = pyqtSignal()           # user wants to add new
-    search_again = pyqtSignal()      # user wants to search
+    search_again = pyqtSignal()      # user wants to search (legacy)
+    search_selected = pyqtSignal(dict)  # user picked a record from search
 
-    def __init__(self, title: str, parent=None):
+    def __init__(self, title: str, placeholder: str = "Type name to search...", parent=None):
         super().__init__(parent)
         self.title_text = title
         self._record = None
+        self._search_fn = None       # callable(term: str) -> list[dict]
+        self._placeholder = placeholder
         self.setStyleSheet("""
             QFrame {
                 background: white;
@@ -202,14 +217,79 @@ class ConfirmationCard(QFrame):
         self.btn_search.setStyleSheet(
             "background: #6B7280; color: white; border-radius: 6px; padding: 8px 16px; border: none;"
         )
-        self.btn_search.clicked.connect(self.search_again.emit)
+        self.btn_search.clicked.connect(self._toggle_search_panel)
         btn_row.addWidget(self.btn_search)
 
         btn_row.addStretch()
         layout.addLayout(btn_row)
 
+        # ── Built-in search panel (hidden by default) ──────────────
+        self._search_frame = QFrame()
+        self._search_frame.setStyleSheet(
+            "QFrame { background: #F9FAFB; border: 1px solid #D1D5DB; border-radius: 8px; }"
+        )
+        sf_layout = QVBoxLayout(self._search_frame)
+        sf_layout.setContentsMargins(12, 10, 12, 10)
+        sf_layout.setSpacing(6)
+
+        sf_title = QLabel("🔎 Search Database")
+        sf_title.setFont(QFont("Segoe UI", 11, QFont.Weight.Bold))
+        sf_title.setStyleSheet("border: none; color: #111827;")
+        sf_layout.addWidget(sf_title)
+
+        search_row = QHBoxLayout()
+        search_row.setSpacing(6)
+        self._search_input = QLineEdit()
+        self._search_input.setPlaceholderText(self._placeholder)
+        self._search_input.setStyleSheet(
+            "border: 1px solid #D1D5DB; border-radius: 6px; padding: 8px; font-size: 12px; background: white;"
+        )
+        self._search_input.returnPressed.connect(self._run_search)
+        search_row.addWidget(self._search_input)
+
+        btn_go = QPushButton("🔍 Search")
+        btn_go.setStyleSheet(
+            "background: #3B82F6; color: white; border-radius: 6px; padding: 8px 16px; "
+            "font-weight: 600; border: none;"
+        )
+        btn_go.clicked.connect(self._run_search)
+        search_row.addWidget(btn_go)
+        sf_layout.addLayout(search_row)
+
+        self._search_results = QListWidget()
+        self._search_results.setMaximumHeight(180)
+        self._search_results.setStyleSheet(
+            "border: 1px solid #E5E7EB; border-radius: 4px; font-size: 11px; background: white;"
+        )
+        self._search_results.itemDoubleClicked.connect(self._on_search_item_dblclick)
+        self._search_results.setVisible(False)
+        sf_layout.addWidget(self._search_results)
+
+        self._btn_use_selected = QPushButton("✅ Use Selected")
+        self._btn_use_selected.setStyleSheet(
+            "background: #059669; color: white; border-radius: 6px; padding: 8px 20px; "
+            "font-weight: 600; border: none;"
+        )
+        self._btn_use_selected.clicked.connect(self._on_use_selected)
+        self._btn_use_selected.setVisible(False)
+        sf_layout.addWidget(self._btn_use_selected)
+
+        self._search_frame.setVisible(False)
+        layout.addWidget(self._search_frame)
+
+    # ── Public API ─────────────────────────────────────────────────
+
+    def set_search_function(self, fn):
+        """Set the callable used to search: fn(term: str) -> list[dict]."""
+        self._search_fn = fn
+
     def set_rx_data(self, text: str):
         self.rx_info.setText(text)
+
+    def show_search_panel(self):
+        """Programmatically reveal the search panel."""
+        self._search_frame.setVisible(True)
+        self._search_input.setFocus()
 
     def set_match_result(self, match: MatchResult):
         self._record = match.record
@@ -228,6 +308,10 @@ class ConfirmationCard(QFrame):
             self.btn_confirm.setStyleSheet(
                 "background: #D1D5DB; color: #9CA3AF; border-radius: 6px; padding: 8px 20px; font-weight: 600; border: none;"
             )
+            # Auto-show search panel when no match
+            if self._search_fn:
+                self._search_frame.setVisible(True)
+                self._search_input.setFocus()
 
         # DB info
         if match.record:
@@ -246,6 +330,8 @@ class ConfirmationCard(QFrame):
                 item = QListWidgetItem(f"{name}  —  {extra}")
                 item.setData(Qt.ItemDataRole.UserRole, c)
                 self.candidates_list.addItem(item)
+
+    # ── Internal helpers ───────────────────────────────────────────
 
     def _format_record(self, rec: dict) -> str:
         lines = []
@@ -266,14 +352,83 @@ class ConfirmationCard(QFrame):
     def _on_candidate_selected(self, item):
         rec = item.data(Qt.ItemDataRole.UserRole)
         if rec:
-            self._record = rec
-            self.db_info.setText(self._format_record(rec))
-            self.btn_confirm.setEnabled(True)
-            self.btn_confirm.setStyleSheet(
-                "background: #059669; color: white; border-radius: 6px; padding: 8px 20px; font-weight: 600; border: none;"
-            )
-            self.status_label.setText("🟡 Selected from candidates — please confirm")
+            self._select_record(rec, "🟡 Selected from candidates — please confirm")
+
+    def _toggle_search_panel(self):
+        """Toggle search panel visibility (also emits legacy signal)."""
+        visible = not self._search_frame.isVisible()
+        self._search_frame.setVisible(visible)
+        if visible:
+            self._search_input.setFocus()
+            self._search_input.selectAll()
+        self.search_again.emit()
+
+    def _run_search(self):
+        """Execute the search callback and populate results."""
+        if not self._search_fn:
+            return
+        term = self._search_input.text().strip()
+        if not term:
+            return
+        results = self._search_fn(term)
+        self._search_results.clear()
+        self._search_results.setVisible(True)
+        if not results:
+            item = QListWidgetItem("No results found.")
+            item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsSelectable)
+            self._search_results.addItem(item)
+            self._btn_use_selected.setVisible(False)
+            return
+        for r in results:
+            name = f"{r.get('last_name', '')}, {r.get('first_name', '')}"
+            extra_parts = []
+            if r.get('dob'):
+                extra_parts.append(f"DOB: {r['dob']}")
+            if r.get('npi_number') or r.get('npi'):
+                extra_parts.append(f"NPI: {r.get('npi_number') or r.get('npi')}")
+            if r.get('title'):
+                extra_parts.append(r['title'])
+            if r.get('phone'):
+                extra_parts.append(f"Ph: {r['phone']}")
+            if r.get('specialty'):
+                extra_parts.append(r['specialty'])
+            display = f"{name}   {'   '.join(extra_parts)}"
+            item = QListWidgetItem(display)
+            item.setData(Qt.ItemDataRole.UserRole, r)
+            self._search_results.addItem(item)
+        self._btn_use_selected.setVisible(True)
+
+    def _on_search_item_dblclick(self, item: QListWidgetItem):
+        rec = item.data(Qt.ItemDataRole.UserRole)
+        if rec:
+            self._accept_search_result(rec)
+
+    def _on_use_selected(self):
+        item = self._search_results.currentItem()
+        if item:
+            rec = item.data(Qt.ItemDataRole.UserRole)
+            if rec:
+                self._accept_search_result(rec)
+
+    def _accept_search_result(self, rec: dict):
+        """Accept a record from the search results."""
+        self._select_record(rec, f"🟢 Selected: {rec.get('last_name', '')}, {rec.get('first_name', '')}")
+        self._search_frame.setVisible(False)
+        self.search_selected.emit(rec)
+
+    def _select_record(self, rec: dict, status_msg: str):
+        """Update card UI to show the selected record."""
+        self._record = rec
+        self.db_info.setText(self._format_record(rec))
+        self.btn_confirm.setEnabled(True)
+        self.btn_confirm.setStyleSheet(
+            "background: #059669; color: white; border-radius: 6px; padding: 8px 20px; font-weight: 600; border: none;"
+        )
+        self.status_label.setText(status_msg)
+        if "🟡" in status_msg:
             self.status_label.setStyleSheet("border: none; color: #D97706; font-size: 11px;")
+        else:
+            self.status_label.setStyleSheet("border: none; color: #059669; font-size: 11px;")
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -313,8 +468,8 @@ class RxImportWizard(QDialog):
         self.attachment_paths: List[str] = []
 
         self.setWindowTitle("📥 Smart Rx Import")
-        self.setMinimumSize(800, 620)
-        self.resize(920, 680)
+        self.setMinimumSize(1100, 680)
+        self.resize(1300, 750)
         self.setWindowFlags(
             Qt.WindowType.Window |
             Qt.WindowType.WindowMinimizeButtonHint |
@@ -333,9 +488,26 @@ class RxImportWizard(QDialog):
         self.step_bar = StepBar()
         main_layout.addWidget(self.step_bar)
 
+        # Splitter: wizard steps (left) + Rx preview (right)
+        self._splitter = QSplitter(Qt.Orientation.Horizontal)
+        self._splitter.setHandleWidth(4)
+        self._splitter.setStyleSheet(
+            "QSplitter::handle { background: #D1D5DB; border-radius: 2px; }"
+        )
+
         # Content area
         self.stack = QStackedWidget()
-        main_layout.addWidget(self.stack, 1)
+        self._splitter.addWidget(self.stack)
+
+        # Rx image preview panel
+        self._preview_panel = self._build_preview_panel()
+        self._splitter.addWidget(self._preview_panel)
+        self._preview_panel.setVisible(False)  # hidden until files parsed
+
+        self._splitter.setStretchFactor(0, 1)  # wizard gets 1/2
+        self._splitter.setStretchFactor(1, 1)  # preview gets 1/2
+
+        main_layout.addWidget(self._splitter, 1)
 
         # Build all step pages
         self.stack.addWidget(self._build_upload_page())      # 0
@@ -358,6 +530,16 @@ class RxImportWizard(QDialog):
 
         nav_layout.addStretch()
 
+        self._btn_show_preview = QPushButton("📄 Show Rx")
+        self._btn_show_preview.setStyleSheet(
+            "background: #F3F4F6; color: #374151; border-radius: 6px; "
+            "padding: 8px 14px; font-weight: 500; border: 1px solid #D1D5DB;"
+        )
+        self._btn_show_preview.setToolTip("Toggle Rx image preview")
+        self._btn_show_preview.clicked.connect(self._toggle_preview)
+        self._btn_show_preview.setVisible(False)  # shown after files are loaded
+        nav_layout.addWidget(self._btn_show_preview)
+
         self.btn_cancel = QPushButton("Cancel")
         self.btn_cancel.setStyleSheet("color: #6B7280; border: none; padding: 8px 16px;")
         self.btn_cancel.clicked.connect(self.reject)
@@ -371,6 +553,200 @@ class RxImportWizard(QDialog):
         main_layout.addWidget(nav_bar)
 
         self._update_nav()
+
+    # ================================================================
+    # Rx Image Preview Panel
+    # ================================================================
+
+    def _build_preview_panel(self) -> QFrame:
+        """Build the persistent Rx image preview panel."""
+        panel = QFrame()
+        panel.setMinimumWidth(300)
+        panel.setStyleSheet("background: #FFFFFF; border-left: 1px solid #E5E7EB;")
+        layout = QVBoxLayout(panel)
+        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setSpacing(6)
+
+        # Header
+        header = QHBoxLayout()
+        header.setSpacing(6)
+        hdr_label = QLabel("📄 Rx Preview")
+        hdr_label.setFont(QFont("Segoe UI", 11, QFont.Weight.Bold))
+        hdr_label.setStyleSheet("border: none; color: #111827;")
+        header.addWidget(hdr_label)
+        header.addStretch()
+
+        self._btn_preview_close = QPushButton("✕")
+        self._btn_preview_close.setFixedSize(24, 24)
+        self._btn_preview_close.setStyleSheet(
+            "background: #E5E7EB; color: #374151; border-radius: 12px; "
+            "font-weight: bold; font-size: 12px; border: none;"
+        )
+        self._btn_preview_close.setToolTip("Hide preview")
+        self._btn_preview_close.clicked.connect(self._toggle_preview)
+        header.addWidget(self._btn_preview_close)
+        layout.addLayout(header)
+
+        # Zoom slider
+        zoom_row = QHBoxLayout()
+        zoom_row.setSpacing(4)
+        zoom_minus = QLabel("−")
+        zoom_minus.setStyleSheet("border: none; color: #6B7280; font-size: 14px; font-weight: bold;")
+        zoom_row.addWidget(zoom_minus)
+        self._zoom_slider = QSlider(Qt.Orientation.Horizontal)
+        self._zoom_slider.setRange(50, 300)
+        self._zoom_slider.setValue(150)
+        self._zoom_slider.setFixedWidth(120)
+        self._zoom_slider.setStyleSheet(
+            "QSlider::groove:horizontal { background: #E5E7EB; height: 4px; border-radius: 2px; }"
+            "QSlider::handle:horizontal { background: #3B82F6; width: 14px; height: 14px; "
+            "margin: -5px 0; border-radius: 7px; }"
+        )
+        self._zoom_slider.valueChanged.connect(self._on_zoom_changed)
+        zoom_row.addWidget(self._zoom_slider)
+        zoom_plus = QLabel("+")
+        zoom_plus.setStyleSheet("border: none; color: #6B7280; font-size: 14px; font-weight: bold;")
+        zoom_row.addWidget(zoom_plus)
+        self._zoom_label = QLabel("150%")
+        self._zoom_label.setStyleSheet("border: none; color: #6B7280; font-size: 10px;")
+        self._zoom_label.setFixedWidth(40)
+        zoom_row.addWidget(self._zoom_label)
+        zoom_row.addStretch()
+        layout.addLayout(zoom_row)
+
+        # Scrollable image area
+        self._preview_scroll = QScrollArea()
+        self._preview_scroll.setWidgetResizable(True)
+        self._preview_scroll.setStyleSheet(
+            "QScrollArea { border: 1px solid #E5E7EB; border-radius: 6px; background: #F3F4F6; }"
+        )
+        self._preview_image_label = QLabel("No Rx loaded")
+        self._preview_image_label.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignHCenter)
+        self._preview_image_label.setStyleSheet("border: none; color: #9CA3AF; background: #F3F4F6; padding: 20px;")
+        self._preview_image_label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Ignored)
+        self._preview_scroll.setWidget(self._preview_image_label)
+        layout.addWidget(self._preview_scroll, 1)
+
+        # Page navigation
+        nav_row = QHBoxLayout()
+        nav_row.setSpacing(6)
+        self._btn_prev_page = QPushButton("◀")
+        self._btn_prev_page.setFixedSize(32, 28)
+        self._btn_prev_page.setStyleSheet(
+            "background: #E5E7EB; color: #374151; border-radius: 4px; font-weight: bold; border: none;"
+        )
+        self._btn_prev_page.clicked.connect(self._prev_preview_page)
+        nav_row.addWidget(self._btn_prev_page)
+
+        self._page_label = QLabel("0 / 0")
+        self._page_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._page_label.setStyleSheet("border: none; color: #374151; font-size: 11px; font-weight: 600;")
+        nav_row.addWidget(self._page_label, 1)
+
+        self._btn_next_page = QPushButton("▶")
+        self._btn_next_page.setFixedSize(32, 28)
+        self._btn_next_page.setStyleSheet(
+            "background: #E5E7EB; color: #374151; border-radius: 4px; font-weight: bold; border: none;"
+        )
+        self._btn_next_page.clicked.connect(self._next_preview_page)
+        nav_row.addWidget(self._btn_next_page)
+        layout.addLayout(nav_row)
+
+        # Internal state
+        self._preview_pages: list = []  # list of QPixmap
+        self._preview_page_idx = 0
+        self._preview_zoom = 150  # percent
+
+        return panel
+
+    def _toggle_preview(self):
+        """Toggle the Rx preview panel visibility."""
+        visible = self._preview_panel.isVisible()
+        self._preview_panel.setVisible(not visible)
+
+    def _load_preview(self):
+        """Render all pages from all uploaded PDFs into preview pixmaps."""
+        self._preview_pages = []
+        self._preview_page_idx = 0
+
+        if not HAS_FITZ or not self.attachment_paths:
+            return
+
+        for path in self.attachment_paths:
+            try:
+                doc = fitz.open(path)
+                for page_num in range(len(doc)):
+                    page = doc[page_num]
+                    # Render at 150 DPI for good quality
+                    mat = fitz.Matrix(150 / 72, 150 / 72)
+                    pix = page.get_pixmap(matrix=mat)
+                    img = QImage(pix.samples, pix.width, pix.height,
+                                 pix.stride, QImage.Format.Format_RGB888)
+                    # Deep-copy so QImage doesn't hold a reference to fitz's buffer
+                    img = img.copy()
+                    pixmap = QPixmap.fromImage(img)
+                    self._preview_pages.append(pixmap)
+                doc.close()
+                del doc
+            except Exception as e:
+                print(f"⚠️ Preview error for {os.path.basename(path)}: {e}")
+
+        if self._preview_pages:
+            self._preview_panel.setVisible(True)
+            self._btn_show_preview.setVisible(True)
+            self._show_preview_page(0)
+            # Force true 50/50 split
+            total = self._splitter.width()
+            half = total // 2
+            self._splitter.setSizes([half, half])
+        else:
+            self._preview_panel.setVisible(False)
+
+    def _show_preview_page(self, idx: int):
+        """Display a specific page in the preview panel."""
+        if not self._preview_pages or idx < 0 or idx >= len(self._preview_pages):
+            return
+        self._preview_page_idx = idx
+        pixmap = self._preview_pages[idx]
+
+        # Scale by zoom factor, fit to panel width
+        panel_w = self._preview_scroll.viewport().width() - 10
+        scale = self._preview_zoom / 100.0
+        target_w = int(panel_w * scale)
+        scaled = pixmap.scaledToWidth(target_w, Qt.TransformationMode.SmoothTransformation)
+
+        self._preview_image_label.setPixmap(scaled)
+        self._preview_image_label.setMinimumSize(scaled.size())
+        self._preview_image_label.resize(scaled.size())
+
+        total = len(self._preview_pages)
+        self._page_label.setText(f"{idx + 1} / {total}")
+        self._btn_prev_page.setEnabled(idx > 0)
+        self._btn_next_page.setEnabled(idx < total - 1)
+
+    def _prev_preview_page(self):
+        if self._preview_page_idx > 0:
+            self._show_preview_page(self._preview_page_idx - 1)
+
+    def _next_preview_page(self):
+        if self._preview_page_idx < len(self._preview_pages) - 1:
+            self._show_preview_page(self._preview_page_idx + 1)
+
+    def _release_preview(self):
+        """Release all preview resources and file handles before moving files."""
+        import gc
+        self._preview_pages.clear()
+        self._preview_page_idx = 0
+        self._preview_image_label.setPixmap(QPixmap())
+        self._preview_image_label.clear()
+        self._preview_panel.setVisible(False)
+        gc.collect()
+
+    def _on_zoom_changed(self, value: int):
+        self._preview_zoom = value
+        self._zoom_label.setText(f"{value}%")
+        if self._preview_pages:
+            self._show_preview_page(self._preview_page_idx)
 
     # ================================================================
     # STEP 0: Upload
@@ -478,6 +854,9 @@ class RxImportWizard(QDialog):
                 f"for {patient.last_name}, {patient.first_name} "
                 f"(DOB: {patient.dob})"
             )
+
+            # Load Rx preview panel
+            self._load_preview()
             # Collect ICD codes and Rx date from all blocks
             self.icd_codes = []
             for rx in self.parsed_rxs:
@@ -504,9 +883,11 @@ class RxImportWizard(QDialog):
         title.setStyleSheet("color: #111827;")
         layout.addWidget(title)
 
-        self.patient_card = ConfirmationCard("Patient")
+        self.patient_card = ConfirmationCard("Patient", placeholder="Type patient name to search...")
+        self.patient_card.set_search_function(lambda term: search_patients(term, folder_path=self.folder_path))
         self.patient_card.confirmed.connect(self._on_patient_confirmed)
         self.patient_card.add_new.connect(self._on_add_new_patient)
+        self.patient_card.search_selected.connect(self._on_patient_search_selected)
         layout.addWidget(self.patient_card)
         layout.addStretch()
         return page
@@ -528,6 +909,11 @@ class RxImportWizard(QDialog):
         # Auto-confirm high confidence matches
         if result.found and result.confidence >= 0.95:
             self.confirmed_patient = result.record
+
+    def _on_patient_search_selected(self, rec: dict):
+        """Patient selected from built-in search panel."""
+        self.confirmed_patient = rec
+        self._go_next()
 
     def _on_patient_confirmed(self, record: dict):
         self.confirmed_patient = record
@@ -819,9 +1205,11 @@ class RxImportWizard(QDialog):
         title.setStyleSheet("color: #111827;")
         layout.addWidget(title)
 
-        self.prescriber_card = ConfirmationCard("Prescriber")
+        self.prescriber_card = ConfirmationCard("Prescriber", placeholder="Type prescriber name or NPI to search...")
+        self.prescriber_card.set_search_function(lambda term: search_prescribers(term, folder_path=self.folder_path))
         self.prescriber_card.confirmed.connect(self._on_prescriber_confirmed)
         self.prescriber_card.add_new.connect(self._on_add_new_prescriber)
+        self.prescriber_card.search_selected.connect(self._on_prescriber_search_selected)
         layout.addWidget(self.prescriber_card)
         layout.addStretch()
         return page
@@ -842,6 +1230,11 @@ class RxImportWizard(QDialog):
         
         if result.found and result.confidence >= 0.95:
             self.confirmed_prescriber = result.record
+
+    def _on_prescriber_search_selected(self, rec: dict):
+        """Prescriber selected from built-in search panel."""
+        self.confirmed_prescriber = rec
+        self._go_next()
 
     def _on_prescriber_confirmed(self, record: dict):
         self.confirmed_prescriber = record
@@ -913,9 +1306,9 @@ class RxImportWizard(QDialog):
 
         # Items table
         self.items_table = QTableWidget()
-        self.items_table.setColumnCount(8)
+        self.items_table.setColumnCount(9)
         self.items_table.setHorizontalHeaderLabels([
-            "Status", "Drug (from Rx)", "HCPCS", "Description (Inventory)", "Qty", "Refills", "Action", "Remove"
+            "Status", "Drug (from Rx)", "HCPCS", "Description (Inventory)", "Qty", "Days", "Refills", "Action", "Remove"
         ])
         header = self.items_table.horizontalHeader()
         header.resizeSection(0, 60)
@@ -924,8 +1317,9 @@ class RxImportWizard(QDialog):
         header.setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
         header.resizeSection(4, 60)
         header.resizeSection(5, 60)
-        header.resizeSection(6, 100)
-        header.resizeSection(7, 70)
+        header.resizeSection(6, 60)
+        header.resizeSection(7, 100)
+        header.resizeSection(8, 70)
         self.items_table.verticalHeader().setVisible(False)
         self.items_table.setAlternatingRowColors(True)
         self.items_table.setStyleSheet("""
@@ -933,6 +1327,20 @@ class RxImportWizard(QDialog):
             QHeaderView::section { background: #F3F4F6; border: none; padding: 8px; font-weight: 600; }
         """)
         layout.addWidget(self.items_table, 1)
+
+        # Add Item button
+        add_row = QHBoxLayout()
+        add_row.setSpacing(8)
+        btn_add_item = QPushButton("➕ Add Item")
+        btn_add_item.setStyleSheet(
+            "background: #3B82F6; color: white; border-radius: 6px; "
+            "padding: 8px 20px; font-weight: 600; font-size: 11px; border: none;"
+        )
+        btn_add_item.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn_add_item.clicked.connect(self._add_blank_item_row)
+        add_row.addWidget(btn_add_item)
+        add_row.addStretch()
+        layout.addLayout(add_row)
 
         # Learning stats
         self.learning_label = QLabel("")
@@ -975,27 +1383,31 @@ class RxImportWizard(QDialog):
             desc_item = QTableWidgetItem(match.description if match.found else "")
             self.items_table.setItem(row, 3, desc_item)
 
-            # Qty, Refills
+            # Qty, Days Supply, Refills
             self.items_table.setItem(row, 4, QTableWidgetItem(str(int(item.quantity))))
-            self.items_table.setItem(row, 5, QTableWidgetItem(str(item.refills)))
+            days_val = str(item.days_supply) if item.days_supply else "30"
+            days_item = QTableWidgetItem(days_val)
+            days_item.setFlags(days_item.flags() | Qt.ItemFlag.ItemIsEditable)
+            self.items_table.setItem(row, 5, days_item)
+            self.items_table.setItem(row, 6, QTableWidgetItem(str(item.refills)))
 
             # Action button
             if not match.found or match.confidence < 0.8:
                 btn = QPushButton("🔍 Search")
                 btn.setStyleSheet("background: #F59E0B; color: white; border-radius: 4px; padding: 4px 10px; font-size: 10px; font-weight: 600;")
                 btn.clicked.connect(lambda checked, r=row, m=match: self._open_item_search(r, m))
-                self.items_table.setCellWidget(row, 6, btn)
+                self.items_table.setCellWidget(row, 7, btn)
             else:
                 confirm_btn = QPushButton("✅ OK")
                 confirm_btn.setStyleSheet("background: #059669; color: white; border-radius: 4px; padding: 4px 10px; font-size: 10px;")
                 confirm_btn.setEnabled(False)
-                self.items_table.setCellWidget(row, 6, confirm_btn)
+                self.items_table.setCellWidget(row, 7, confirm_btn)
 
             # Remove button
             rm_btn = QPushButton("\u2715 Remove")
             rm_btn.setStyleSheet("background: #EF4444; color: white; border-radius: 4px; padding: 4px 8px; font-size: 10px; font-weight: 600;")
             rm_btn.clicked.connect(lambda checked, r=row: self._remove_item_row(r))
-            self.items_table.setCellWidget(row, 7, rm_btn)
+            self.items_table.setCellWidget(row, 8, rm_btn)
 
             # Store match data (including fee schedule pricing)
             self.items_table.item(row, 0).setData(Qt.ItemDataRole.UserRole, {
@@ -1030,7 +1442,87 @@ class RxImportWizard(QDialog):
             rm_btn = QPushButton("\u2715 Remove")
             rm_btn.setStyleSheet("background: #EF4444; color: white; border-radius: 4px; padding: 4px 8px; font-size: 10px; font-weight: 600;")
             rm_btn.clicked.connect(lambda checked, rr=r: self._remove_item_row(rr))
-            self.items_table.setCellWidget(r, 7, rm_btn)
+            self.items_table.setCellWidget(r, 8, rm_btn)
+
+    def _add_blank_item_row(self):
+        """Add a blank editable row so the user can manually enter an item."""
+        row = self.items_table.rowCount()
+        self.items_table.insertRow(row)
+
+        # Status — pending
+        status_item = QTableWidgetItem("⬜")
+        self.items_table.setItem(row, 0, status_item)
+
+        # Drug name — editable
+        drug_item = QTableWidgetItem("")
+        drug_item.setFlags(drug_item.flags() | Qt.ItemFlag.ItemIsEditable)
+        self.items_table.setItem(row, 1, drug_item)
+
+        # HCPCS — editable
+        hcpcs_item = QTableWidgetItem("")
+        hcpcs_item.setFlags(hcpcs_item.flags() | Qt.ItemFlag.ItemIsEditable)
+        self.items_table.setItem(row, 2, hcpcs_item)
+
+        # Description — editable
+        desc_item = QTableWidgetItem("")
+        desc_item.setFlags(desc_item.flags() | Qt.ItemFlag.ItemIsEditable)
+        self.items_table.setItem(row, 3, desc_item)
+
+        # Qty — editable, default 1
+        qty_item = QTableWidgetItem("1")
+        qty_item.setFlags(qty_item.flags() | Qt.ItemFlag.ItemIsEditable)
+        self.items_table.setItem(row, 4, qty_item)
+
+        # Days — editable, default 30
+        days_item = QTableWidgetItem("30")
+        days_item.setFlags(days_item.flags() | Qt.ItemFlag.ItemIsEditable)
+        self.items_table.setItem(row, 5, days_item)
+
+        # Refills — editable, default 0
+        refills_item = QTableWidgetItem("0")
+        refills_item.setFlags(refills_item.flags() | Qt.ItemFlag.ItemIsEditable)
+        self.items_table.setItem(row, 6, refills_item)
+
+        # Search button
+        from dmelogic.services.rx_matcher import ItemMatchResult
+        blank_match = ItemMatchResult(hcpcs="", drug_name="")
+        btn = QPushButton("🔍 Search")
+        btn.setStyleSheet(
+            "background: #F59E0B; color: white; border-radius: 4px; "
+            "padding: 4px 10px; font-size: 10px; font-weight: 600;"
+        )
+        btn.clicked.connect(lambda checked, r=row, m=blank_match: self._open_item_search(r, m))
+        self.items_table.setCellWidget(row, 7, btn)
+
+        # Remove button
+        rm_btn = QPushButton("\u2715 Remove")
+        rm_btn.setStyleSheet(
+            "background: #EF4444; color: white; border-radius: 4px; "
+            "padding: 4px 8px; font-size: 10px; font-weight: 600;"
+        )
+        rm_btn.clicked.connect(lambda checked, r=row: self._remove_item_row(r))
+        self.items_table.setCellWidget(row, 8, rm_btn)
+
+        # Store blank data
+        status_item.setData(Qt.ItemDataRole.UserRole, {
+            "drug_name": "",
+            "match": blank_match,
+            "quantity": 1,
+            "refills": 0,
+            "days_supply": 30,
+            "directions": "",
+            "retail_price": 0.0,
+            "item_number": "",
+            "fee": 0.0,
+            "rental_fee": 0.0,
+            "max_units": 0,
+            "pa_required": "",
+        })
+
+        # Scroll to new row and start editing the drug name
+        self.items_table.scrollToItem(drug_item)
+        self.items_table.setCurrentItem(drug_item)
+        self.items_table.editItem(drug_item)
 
     def _open_item_search(self, row: int, match: ItemMatchResult):
         """Open inventory search dialog for a specific item."""
@@ -1056,7 +1548,7 @@ class RxImportWizard(QDialog):
                     ok_btn = QPushButton("✅ OK")
                     ok_btn.setStyleSheet("background: #059669; color: white; border-radius: 4px; padding: 4px 10px; font-size: 10px;")
                     ok_btn.setEnabled(False)
-                    self.items_table.setCellWidget(row, 6, ok_btn)
+                    self.items_table.setCellWidget(row, 7, ok_btn)
 
                     # Look up pricing via fee schedule + inventory
                     temp_result = ItemMatchResult(hcpcs=hcpcs, drug_name=drug_name)
@@ -1268,7 +1760,8 @@ class RxImportWizard(QDialog):
             desc = (self.items_table.item(row, 3) or QTableWidgetItem("")).text().strip()
             drug = (self.items_table.item(row, 1) or QTableWidgetItem("")).text().strip()
             qty = (self.items_table.item(row, 4) or QTableWidgetItem("1")).text().strip()
-            refills = (self.items_table.item(row, 5) or QTableWidgetItem("0")).text().strip()
+            days_supply_str = (self.items_table.item(row, 5) or QTableWidgetItem("30")).text().strip()
+            refills = (self.items_table.item(row, 6) or QTableWidgetItem("0")).text().strip()
             
             row_data = self.items_table.item(row, 0).data(Qt.ItemDataRole.UserRole) or {}
             retail_price = row_data.get("retail_price", 0.0) or 0.0
@@ -1316,7 +1809,7 @@ class RxImportWizard(QDialog):
                 "description": desc or drug,
                 "quantity": qty_int,
                 "refills": int(refills) if refills.isdigit() else 0,
-                "days_supply": row_data.get("days_supply", 0),
+                "days_supply": int(days_supply_str) if days_supply_str.isdigit() else row_data.get("days_supply", 30),
                 "directions": row_data.get("directions", ""),
                 "retail_price": retail_price,
                 "item_number": item_number,
@@ -1538,6 +2031,12 @@ class RxImportWizard(QDialog):
 
             self.order_created.emit(new_order_id)
 
+            # Release preview file handles before attempting to move files
+            self._release_preview()
+
+            # --- Move Rx files to a different folder ---
+            self._offer_move_rx(new_order_id, patient_last, patient_first)
+
             # Open EPACES helper if available
             try:
                 from dmelogic.db import fetch_order_with_items
@@ -1551,6 +2050,291 @@ class RxImportWizard(QDialog):
 
         except Exception as e:
             QMessageBox.critical(self, "Error Creating Order", f"Failed to create order:\n\n{e}")
+
+    # ================================================================
+    # Move Rx Files
+    # ================================================================
+
+    def _offer_move_rx(self, order_id: int, patient_last: str, patient_first: str):
+        """Offer to move the Rx PDF file(s) to a different folder after order creation."""
+        if not self.attachment_paths:
+            return
+
+        import shutil
+        import json
+
+        # Load last-used destination from settings
+        last_dest = ""
+        recent_dirs: list = []
+        settings_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "settings.json")
+        settings_path = os.path.normpath(settings_path)
+        try:
+            if os.path.exists(settings_path):
+                with open(settings_path, "r") as f:
+                    settings = json.load(f)
+                last_dest = settings.get("rx_move_last_folder", "")
+                recent_dirs = settings.get("rx_move_recent_folders", [])
+        except Exception:
+            pass
+
+        # Build the dialog
+        dlg = QDialog(self)
+        dlg.setWindowTitle("📁 Move Rx Files")
+        dlg.setMinimumWidth(520)
+        dlg.setStyleSheet("background: #F9FAFB;")
+        layout = QVBoxLayout(dlg)
+        layout.setContentsMargins(20, 16, 20, 16)
+        layout.setSpacing(12)
+
+        title = QLabel("📁 Move Rx Files to Folder")
+        title.setFont(QFont("Segoe UI", 14, QFont.Weight.Bold))
+        title.setStyleSheet("color: #111827;")
+        layout.addWidget(title)
+
+        desc = QLabel(
+            f"Order ORD-{order_id:03d} created for {patient_last}, {patient_first}.\n"
+            f"Move the {len(self.attachment_paths)} Rx file(s) to a completed/patient folder?"
+        )
+        desc.setWordWrap(True)
+        desc.setStyleSheet("color: #6B7280; font-size: 11px;")
+        layout.addWidget(desc)
+
+        # File list
+        file_frame = QFrame()
+        file_frame.setStyleSheet("background: white; border: 1px solid #E5E7EB; border-radius: 6px;")
+        fl = QVBoxLayout(file_frame)
+        fl.setContentsMargins(10, 8, 10, 8)
+        for p in self.attachment_paths:
+            fl.addWidget(QLabel(f"📄 {os.path.basename(p)}"))
+        layout.addWidget(file_frame)
+
+        # Destination folder
+        dest_label = QLabel("Destination Folder:")
+        dest_label.setFont(QFont("Segoe UI", 10, QFont.Weight.Bold))
+        dest_label.setStyleSheet("color: #374151;")
+        layout.addWidget(dest_label)
+
+        # Recent folders combo + browse button
+        dest_row = QHBoxLayout()
+        dest_row.setSpacing(6)
+
+        dest_combo = QComboBox()
+        dest_combo.setEditable(True)
+        dest_combo.setMinimumWidth(350)
+        dest_combo.setStyleSheet(
+            "QComboBox { border: 1px solid #D1D5DB; border-radius: 6px; padding: 8px; font-size: 12px; background: white; }"
+        )
+        # Populate recent folders
+        if last_dest:
+            dest_combo.addItem(last_dest)
+        for d in recent_dirs:
+            if d != last_dest:
+                dest_combo.addItem(d)
+        if dest_combo.count() == 0:
+            dest_combo.setCurrentText("")
+
+        # Auto-suggest a subfolder based on the patient's last name initial
+        # e.g.  "C:/Faxes OCR'd"  →  "C:/Faxes OCR'd/T"  for TORIBIO
+        if patient_last and dest_combo.currentText().strip():
+            base_dest = dest_combo.currentText().strip()
+            letter = patient_last[0].upper()
+
+            # If the saved path already ends in a single letter subfolder
+            # (from a previous move), use its parent as the base instead
+            tail = os.path.basename(base_dest)
+            if len(tail) == 1 and tail.isalpha():
+                base_dest = os.path.dirname(base_dest)
+
+            suggested = os.path.join(base_dest, letter)
+            # Only suggest if the letter subfolder already exists OR
+            # there are other letter-subfolders (A-Z) in the base
+            if os.path.isdir(suggested):
+                dest_combo.setCurrentText(suggested)
+            elif os.path.isdir(base_dest):
+                # Check if the base folder uses letter-based organization
+                try:
+                    subs = [d for d in os.listdir(base_dest)
+                            if os.path.isdir(os.path.join(base_dest, d))
+                            and len(d) == 1 and d.isalpha()]
+                    if subs:  # Has letter subfolders — suggest the right one
+                        dest_combo.setCurrentText(suggested)
+                except Exception:
+                    pass
+
+        dest_row.addWidget(dest_combo, 1)
+
+        btn_browse = QPushButton("📂 Browse...")
+        btn_browse.setStyleSheet(
+            "background: #3B82F6; color: white; border-radius: 6px; "
+            "padding: 8px 16px; font-weight: 600; border: none;"
+        )
+        def _browse_dest():
+            folder = QFileDialog.getExistingDirectory(dlg, "Select Destination Folder", dest_combo.currentText())
+            if folder:
+                dest_combo.setCurrentText(folder)
+        btn_browse.clicked.connect(_browse_dest)
+        dest_row.addWidget(btn_browse)
+        layout.addLayout(dest_row)
+
+        # Buttons
+        btn_row = QHBoxLayout()
+        btn_row.setSpacing(10)
+        btn_row.addStretch()
+
+        btn_skip = QPushButton("Skip — Don't Move")
+        btn_skip.setStyleSheet(
+            "background: #E5E7EB; color: #374151; border-radius: 6px; "
+            "padding: 10px 20px; font-weight: 500; border: none;"
+        )
+        btn_skip.clicked.connect(dlg.reject)
+        btn_row.addWidget(btn_skip)
+
+        btn_move = QPushButton("📁 Move Files")
+        btn_move.setStyleSheet(
+            "background: #059669; color: white; border-radius: 6px; "
+            "padding: 10px 24px; font-weight: 700; font-size: 12px; border: none;"
+        )
+        btn_move.clicked.connect(dlg.accept)
+        btn_row.addWidget(btn_move)
+        btn_row.addStretch()
+        layout.addLayout(btn_row)
+
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+
+        dest_folder = dest_combo.currentText().strip()
+        if not dest_folder:
+            return
+
+        # Create destination folder if needed
+        os.makedirs(dest_folder, exist_ok=True)
+
+        moved = []
+        errors = []
+        for src_path in self.attachment_paths:
+            try:
+                basename = os.path.basename(src_path)
+                dst_path = os.path.join(dest_folder, basename)
+                # Handle name collision
+                if os.path.exists(dst_path):
+                    name, ext = os.path.splitext(basename)
+                    dst_path = os.path.join(dest_folder, f"{name}_ORD{order_id:03d}{ext}")
+
+                # Release any main-window file handle on this PDF
+                self._close_main_viewer_if_open(src_path)
+
+                # Small delay to let Windows release the file handle
+                import time
+                time.sleep(0.3)
+
+                # Try move with retries (Windows may delay releasing handles)
+                self._move_with_retry(src_path, dst_path)
+                moved.append(basename)
+            except Exception as e:
+                errors.append(f"{os.path.basename(src_path)}: {e}")
+
+        # Save last-used folder to settings
+        try:
+            settings = {}
+            if os.path.exists(settings_path):
+                with open(settings_path, "r") as f:
+                    settings = json.load(f)
+            settings["rx_move_last_folder"] = dest_folder
+            # Update recent folders list (max 10)
+            recents = settings.get("rx_move_recent_folders", [])
+            if dest_folder in recents:
+                recents.remove(dest_folder)
+            recents.insert(0, dest_folder)
+            settings["rx_move_recent_folders"] = recents[:10]
+            with open(settings_path, "w") as f:
+                json.dump(settings, f, indent=2)
+        except Exception:
+            pass
+
+        if errors:
+            QMessageBox.warning(
+                self, "Move Errors",
+                f"Moved {len(moved)} file(s), but {len(errors)} failed:\n\n" + "\n".join(errors)
+            )
+        elif moved:
+            QMessageBox.information(
+                self, "Files Moved",
+                f"✅ Moved {len(moved)} file(s) to:\n{dest_folder}"
+            )
+
+    def _close_main_viewer_if_open(self, file_path: str):
+        """Close the main window's PDF viewer if it has this file open."""
+        import gc
+        try:
+            mw = self.main_window
+            if not mw:
+                return
+
+            target = os.path.normcase(os.path.abspath(file_path))
+
+            # Check current_pdf_path (full path) — primary attribute
+            mw_path = getattr(mw, 'current_pdf_path', '') or ''
+            if mw_path:
+                mw_path = os.path.normcase(os.path.abspath(mw_path))
+
+            # Also check current_file (may be just a filename)
+            mw_file = getattr(mw, 'current_file', '') or ''
+            if mw_file and not os.path.isabs(mw_file):
+                folder = getattr(mw, 'folder_path', '') or ''
+                if folder:
+                    mw_file = os.path.normcase(os.path.abspath(os.path.join(folder, mw_file)))
+                else:
+                    mw_file = ''
+            elif mw_file:
+                mw_file = os.path.normcase(os.path.abspath(mw_file))
+
+            if target == mw_path or target == mw_file:
+                for attr in ('doc', 'pdf_document'):
+                    doc = getattr(mw, attr, None)
+                    if doc:
+                        try:
+                            doc.close()
+                        except Exception:
+                            pass
+                        setattr(mw, attr, None)
+                mw.current_file = None
+                mw.current_pdf_path = None if hasattr(mw, 'current_pdf_path') else None
+                gc.collect()
+                print(f"🔓 Released main viewer lock on {os.path.basename(file_path)}")
+        except Exception as e:
+            print(f"⚠️ Error releasing main viewer: {e}")
+
+    @staticmethod
+    def _move_with_retry(src: str, dst: str, retries: int = 4, delay: float = 0.5):
+        """Move file with retry + copy-then-delete fallback for Windows locks."""
+        import time, shutil, gc
+        last_err = None
+        for attempt in range(retries):
+            try:
+                shutil.move(src, dst)
+                return  # success
+            except PermissionError as e:
+                last_err = e
+                gc.collect()
+                time.sleep(delay * (attempt + 1))
+
+        # All retries failed — try copy + delete as a last resort
+        try:
+            shutil.copy2(src, dst)
+            # Try deleting the source with retries
+            for attempt in range(retries):
+                try:
+                    os.remove(src)
+                    return  # success
+                except PermissionError:
+                    gc.collect()
+                    time.sleep(delay * (attempt + 1))
+            # Copy succeeded but delete failed — still acceptable
+            return
+        except Exception:
+            pass
+
+        raise last_err  # raise original error if everything failed
 
     # ================================================================
     # Navigation

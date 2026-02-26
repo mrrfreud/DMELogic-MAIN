@@ -315,6 +315,7 @@ def row_to_order(row: sqlite3.Row) -> Order:
         hold_set_at=safe_datetime(safe_get(row, "hold_set_at")),
         notes=safe_get(row, "notes"),
         special_instructions=safe_get(row, "special_instructions"),
+        epaces_alert=safe_get(row, "epaces_alert"),
         icd_codes=icd_codes,
         doctor_directions=safe_get(row, "doctor_directions"),
         parent_order_id=safe_get(row, "parent_order_id"),

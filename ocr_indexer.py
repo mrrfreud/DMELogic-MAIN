@@ -57,7 +57,8 @@ class OCRIndexer:
             with sqlite3.connect(self.db_path) as conn:
                 # Check FTS5 availability
                 try:
-                    conn.execute("SELECT fts5_version()")
+                    conn.execute("CREATE VIRTUAL TABLE IF NOT EXISTS _fts5_check USING fts5(c)")
+                    conn.execute("DROP TABLE IF EXISTS _fts5_check")
                     print("[OK] FTS5 is available")
                 except sqlite3.OperationalError:
                     print("[WARNING] FTS5 not available - install pysqlite3-binary for better performance")
@@ -74,12 +75,70 @@ class OCRIndexer:
                     print(f"[OK] Database initialized (without FTS5): {self.db_path}")
                     return
                 
-                # Create FTS5 virtual table
+                # ── Migrate existing table → FTS5 with rel_path if needed ──
+                try:
+                    row = conn.execute(
+                        "SELECT sql FROM sqlite_master WHERE name = 'ocr_index' AND type = 'table'"
+                    ).fetchone()
+                    if row:
+                        ddl = row[0] or ""
+                        is_fts5 = "VIRTUAL" in ddl.upper() and "FTS5" in ddl.upper()
+                        has_rel_path = "rel_path" in ddl.lower()
+                        needs_migration = (not is_fts5) or (not has_rel_path)
+                        
+                        if needs_migration:
+                            reason = "regular→FTS5" if not is_fts5 else "add rel_path column"
+                            print(f"[MIGRATE] Converting ocr_index ({reason})...")
+                            
+                            # Detect columns in old table
+                            cols = [r[1] for r in conn.execute("PRAGMA table_info(ocr_index)").fetchall()]
+                            old_has_rel = 'rel_path' in cols
+                            
+                            # Read all existing data
+                            if old_has_rel:
+                                old_data = conn.execute(
+                                    "SELECT filepath, text, last_modified, rel_path FROM ocr_index"
+                                ).fetchall()
+                            else:
+                                old_data = [
+                                    (r[0], r[1], r[2], os.path.basename(r[0]))
+                                    for r in conn.execute(
+                                        "SELECT filepath, text, last_modified FROM ocr_index"
+                                    ).fetchall()
+                                ]
+                            
+                            # Drop old table
+                            conn.execute("DROP TABLE ocr_index")
+                            conn.commit()
+                            
+                            # Create FTS5 virtual table with rel_path
+                            conn.execute("""
+                                CREATE VIRTUAL TABLE ocr_index USING fts5(
+                                    filepath,
+                                    text,
+                                    last_modified UNINDEXED,
+                                    rel_path UNINDEXED
+                                )
+                            """)
+                            
+                            # Re-insert data
+                            if old_data:
+                                conn.executemany(
+                                    "INSERT INTO ocr_index (filepath, text, last_modified, rel_path) VALUES (?, ?, ?, ?)",
+                                    old_data
+                                )
+                            conn.commit()
+                            print(f"[MIGRATE] Successfully migrated {len(old_data)} entries to FTS5")
+                except Exception as e:
+                    print(f"[MIGRATE] Migration check: {e}")
+                
+                # Create FTS5 virtual table (if it doesn't exist yet)
                 conn.execute("""
                     CREATE VIRTUAL TABLE IF NOT EXISTS ocr_index USING fts5(
                         filepath,
                         text,
-                        last_modified UNINDEXED
+                        last_modified UNINDEXED,
+                        rel_path UNINDEXED
                     )
                 """)
                 
@@ -387,23 +446,36 @@ class OCRIndexer:
         Batch insert/update multiple files for better performance.
         
         Args:
-            file_data (List[tuple]): List of (file_path, text, last_modified) tuples
+            file_data (List[tuple]): List of (file_path, text, last_modified) or
+                                     (file_path, text, last_modified, rel_path) tuples
         """
         if not file_data:
             return
         
         with self._db_lock:
             with sqlite3.connect(self.db_path) as conn:
+                # Ensure rel_path column exists (migration)
+                try:
+                    conn.execute("ALTER TABLE ocr_index ADD COLUMN rel_path TEXT")
+                    conn.commit()
+                except sqlite3.OperationalError:
+                    pass  # Column already exists
+                
                 # Use a single transaction for all operations
                 conn.execute("BEGIN TRANSACTION")
                 try:
-                    for file_path, text, last_modified in file_data:
+                    for item in file_data:
+                        if len(item) >= 4:
+                            file_path, text, last_modified, rel_path = item[0], item[1], item[2], item[3]
+                        else:
+                            file_path, text, last_modified = item[0], item[1], item[2]
+                            rel_path = os.path.basename(file_path)
                         # Remove existing entry
                         conn.execute("DELETE FROM ocr_index WHERE filepath = ?", (file_path,))
-                        # Insert new entry
+                        # Insert new entry with rel_path
                         conn.execute(
-                            "INSERT INTO ocr_index (filepath, text, last_modified) VALUES (?, ?, ?)",
-                            (file_path, text, last_modified)
+                            "INSERT INTO ocr_index (filepath, text, last_modified, rel_path) VALUES (?, ?, ?, ?)",
+                            (file_path, text, last_modified, rel_path)
                         )
                     
                     conn.execute("COMMIT")
@@ -582,8 +654,11 @@ def update_index_from_folder(folder_path: str, db_path: str, indexer: OCRIndexer
                     # Extract text using OCR tools
                     text = extract_text_from_pdf(file_path)
                     
-                    # Add to batch
-                    batch_data.append((file_path, text, current_modified))
+                    # Compute rel_path from folder root
+                    rel_path = os.path.relpath(file_path, folder_path)
+                    
+                    # Add to batch (with rel_path)
+                    batch_data.append((file_path, text, current_modified, rel_path))
                     updated_count += 1
                     
                     # Process batch when it reaches batch_size or at the end
@@ -729,7 +804,9 @@ def watch_folder(folder_path: str, db_path: str, stop_event: Event = None):
                     if cached_modified is not None and current_modified <= cached_modified:
                         continue
                     text = extract_text_from_pdf(file_path)
-                    batch_data.append((file_path, text, current_modified))
+                    # Compute rel_path from watched folder root
+                    rel_path = os.path.relpath(file_path, folder_path)
+                    batch_data.append((file_path, text, current_modified, rel_path))
                 except Exception as e:
                     error_msg = f"{os.path.basename(file_path)}: {e}\n"
                     print(f"Error updating index for {file_path}: {e}")

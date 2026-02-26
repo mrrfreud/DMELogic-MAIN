@@ -560,6 +560,7 @@ class Order:
     # Additional fields
     notes: Optional[str] = None
     special_instructions: Optional[str] = None  # Delivery notes for driver
+    epaces_alert: Optional[str] = None  # Popup alert shown when EPACES helper opens
     created_date: Optional[datetime] = None
     updated_date: Optional[datetime] = None
     

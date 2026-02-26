@@ -389,14 +389,17 @@ def get_connection(filename: str, folder_path: Optional[str] = None) -> sqlite3.
     - synchronous=NORMAL: Balance between safety and performance
     """
     db_path = resolve_db_path(filename, folder_path=folder_path)
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, timeout=10)
     
     # Enable foreign key constraints for data integrity
     conn.execute("PRAGMA foreign_keys = ON;")
     
     # Use WAL mode for better concurrency - allows multiple readers while writing
-    # This is crucial for multi-window operation where multiple dialogs may access DB
+    # This is crucial for multi-user and multi-window operation
     conn.execute("PRAGMA journal_mode = WAL;")
+    
+    # Wait up to 5 seconds if another process holds a write lock
+    conn.execute("PRAGMA busy_timeout = 5000;")
     
     # NORMAL synchronous mode: fsync only at critical moments (checkpoint)
     # Balances performance and safety - much faster than FULL, still safe
@@ -440,10 +443,11 @@ class UnitOfWork:
 
         if filename not in self._conns:
             db_path = resolve_db_path(filename, folder_path=self.folder_path)
-            conn = sqlite3.connect(db_path)
+            conn = sqlite3.connect(db_path, timeout=10)
             # Apply same PRAGMAs as get_connection for consistency
             conn.execute("PRAGMA foreign_keys = ON;")
             conn.execute("PRAGMA journal_mode = WAL;")
+            conn.execute("PRAGMA busy_timeout = 5000;")
             conn.execute("PRAGMA synchronous = NORMAL;")
             self._conns[filename] = conn
 

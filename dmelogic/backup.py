@@ -36,9 +36,15 @@ DEFAULT_DAILY_RETENTION = 7
 DEFAULT_WEEKLY_RETENTION = 7
 
 # OCR Folder Backup Constants
-OCR_SOURCE_FOLDER = Path(r"C:\FaxManagerData\FaxManagerData\Faxes OCR'd")
+from .paths import ocr_folder as _ocr_folder_fn
+OCR_SOURCE_FOLDER = None  # Resolved lazily via ocr_folder()
 OCR_BACKUP_DEST = Path(r"C:\Users\pharmacy\OneDrive - 1st Aid Pharmacy\DME Solutions\OCDRd_FOLDER_BACKUP")
 OCR_KEEP_LAST = 7
+
+
+def _get_ocr_source() -> Path:
+    """Get OCR source folder (lazy, so settings are loaded first)."""
+    return _ocr_folder_fn()
 
 
 # ----------------------------------------------------------
@@ -532,7 +538,7 @@ class BackupWorker(QObject):
             try:
                 debug_log("Starting OCR folder backup to OneDrive...")
                 ocr_result = backup_folder_to_zip(
-                    src_folder=OCR_SOURCE_FOLDER,
+                    src_folder=_get_ocr_source(),
                     dest_folder=OCR_BACKUP_DEST,
                     prefix="OCR_DAILY",
                     keep_last=OCR_KEEP_LAST,

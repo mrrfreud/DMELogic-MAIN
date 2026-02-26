@@ -191,6 +191,7 @@ def fetch_patient_insurance(
 def search_patients(search_term: str, folder_path: Optional[str] = None) -> List[dict]:
     """
     Search patients by name (first or last).
+    Supports 'last,first', 'last first', or single-term searches.
     Returns list of dicts with patient info.
     """
     try:
@@ -198,18 +199,37 @@ def search_patients(search_term: str, folder_path: Optional[str] = None) -> List
         conn.row_factory = sqlite3.Row
         try:
             cur = conn.cursor()
-            like = f"%{search_term}%"
-            cur.execute(
-                """
-                SELECT id, first_name, last_name, dob, phone, address
-                FROM patients
-                WHERE first_name LIKE ? OR last_name LIKE ?
-                   OR (first_name || ' ' || last_name) LIKE ?
-                ORDER BY last_name, first_name
-                LIMIT 50
-                """,
-                (like, like, like)
-            )
+            # Split on comma or whitespace for "last,first" / "last first" input
+            parts = [p.strip() for p in search_term.replace(',', ' ').split() if p.strip()]
+            if len(parts) >= 2:
+                # Two-part search: match last AND first (either order)
+                like1 = f"%{parts[0]}%"
+                like2 = f"%{parts[1]}%"
+                cur.execute(
+                    """
+                    SELECT id, first_name, last_name, dob, phone, address
+                    FROM patients
+                    WHERE (last_name LIKE ? AND first_name LIKE ?)
+                       OR (last_name LIKE ? AND first_name LIKE ?)
+                    ORDER BY last_name, first_name
+                    LIMIT 50
+                    """,
+                    (like1, like2, like2, like1)
+                )
+            else:
+                term = parts[0] if parts else search_term.strip()
+                like = f"%{term}%"
+                cur.execute(
+                    """
+                    SELECT id, first_name, last_name, dob, phone, address
+                    FROM patients
+                    WHERE first_name LIKE ? OR last_name LIKE ?
+                       OR (first_name || ' ' || last_name) LIKE ?
+                    ORDER BY last_name, first_name
+                    LIMIT 50
+                    """,
+                    (like, like, like)
+                )
             return [dict(row) for row in cur.fetchall()]
         finally:
             conn.close()

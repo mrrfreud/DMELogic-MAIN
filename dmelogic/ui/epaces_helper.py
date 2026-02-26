@@ -555,56 +555,61 @@ class EpacesHelperDialog(QDialog):
                 traceback.print_exc()
                 pass
 
-        # Primary / secondary insurance - try order first, then patient record
-        primary_name = (
-            getattr(o, "insurance_name_at_order_time", None)
-            or getattr(o, "primary_insurance", None)
-            or getattr(o, "primary_insurance_name", "")
-            or ""
-        )
-        primary_id = (
-            getattr(o, "insurance_id_at_order_time", None)
-            or getattr(o, "primary_insurance_id", None)
-            or ""
-        )
-        secondary_name = (
-            getattr(o, "secondary_insurance_name_at_order_time", None)
-            or getattr(o, "secondary_insurance", None)
-            or getattr(o, "secondary_insurance_name", "")
-            or ""
-        )
-        secondary_id = (
-            getattr(o, "secondary_insurance_id_at_order_time", None)
-            or getattr(o, "secondary_insurance_id", None)
-            or ""
-        )
-        
-        # Fallback to patient record for insurance if order lacks it
+        # Primary / secondary insurance — always use patient record as
+        # authoritative source.  The order's primary_insurance field stores
+        # whichever payer the order is billed to (could be secondary), so
+        # it is NOT a reliable source for the patient's actual primary.
+        primary_name = ""
+        primary_id = ""
+        secondary_name = ""
+        secondary_id = ""
+
+        def _get_field(row, *field_names):
+            """Safely get a field from a sqlite Row using multiple possible field names."""
+            if hasattr(row, "keys"):
+                row_keys = row.keys()
+                for k in field_names:
+                    if k in row_keys:
+                        val = row[k]
+                        if val:
+                            return str(val).strip()
+            return ""
+
         if patient_record:
             try:
-                def get_field(row, *field_names):
-                    """Safely get a field from a sqlite Row using multiple possible field names."""
-                    if hasattr(row, "keys"):
-                        row_keys = row.keys()
-                        for k in field_names:
-                            if k in row_keys:
-                                val = row[k]
-                                if val:
-                                    return str(val).strip()
-                    return ""
-                
-                # Patients table uses: primary_insurance, policy_number, secondary_insurance, secondary_insurance_id
-                if not primary_name:
-                    primary_name = get_field(patient_record, "primary_insurance")
-                if not primary_id:
-                    primary_id = get_field(patient_record, "policy_number", "primary_insurance_id")
-                if not secondary_name:
-                    secondary_name = get_field(patient_record, "secondary_insurance")
-                if not secondary_id:
-                    secondary_id = get_field(patient_record, "secondary_insurance_id", "secondary_policy", "secondary_policy_number")
-                print(f"EPACES: Insurance after patient fallback - pri: {primary_name}/{primary_id}, sec: {secondary_name}/{secondary_id}")
+                primary_name = _get_field(patient_record, "primary_insurance")
+                primary_id = _get_field(patient_record, "policy_number", "primary_insurance_id")
+                secondary_name = _get_field(patient_record, "secondary_insurance")
+                secondary_id = _get_field(patient_record, "secondary_insurance_id", "secondary_policy", "secondary_policy_number")
+                print(f"EPACES: Insurance from patient record - pri: {primary_name}/{primary_id}, sec: {secondary_name}/{secondary_id}")
             except Exception as e:
                 print(f"EPACES: Failed to get insurance from patient: {e}")
+
+        # Fallback to order fields only when patient record is unavailable
+        if not primary_name and not primary_id:
+            primary_name = (
+                getattr(o, "insurance_name_at_order_time", None)
+                or getattr(o, "primary_insurance", None)
+                or getattr(o, "primary_insurance_name", "")
+                or ""
+            )
+            primary_id = (
+                getattr(o, "insurance_id_at_order_time", None)
+                or getattr(o, "primary_insurance_id", None)
+                or ""
+            )
+        if not secondary_name and not secondary_id:
+            secondary_name = (
+                getattr(o, "secondary_insurance_name_at_order_time", None)
+                or getattr(o, "secondary_insurance", None)
+                or getattr(o, "secondary_insurance_name", "")
+                or ""
+            )
+            secondary_id = (
+                getattr(o, "secondary_insurance_id_at_order_time", None)
+                or getattr(o, "secondary_insurance_id", None)
+                or ""
+            )
 
         self._primary_ins_id = primary_id or ""
         self._secondary_ins_id = secondary_id or ""

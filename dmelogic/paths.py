@@ -158,6 +158,67 @@ def fax_root() -> Path:
     return Path(r"C:\FaxManagerData")
 
 
+def ocr_folder() -> Path:
+    """
+    The folder containing scanned/OCR'd documents.
+
+    Priority:
+    1. Settings.json ``ocr_folder`` (explicit override — use this when
+       the folder moves to an external drive)
+    2. ``fax_root() / "FaxManagerData" / "Faxes OCR'd"`` (current default)
+    """
+    try:
+        from .settings import load_settings
+        settings = load_settings()
+        explicit = settings.get("ocr_folder")
+        if explicit:
+            p = Path(explicit)
+            if p.exists():
+                return p
+    except Exception:
+        pass
+    return fax_root() / "FaxManagerData" / "Faxes OCR'd"
+
+
+def ocr_cache_db() -> Path:
+    """Path to the OCR index/cache database, kept alongside the OCR folder."""
+    return ocr_folder().parent / "ocr_cache.db"
+
+
+def resolve_document_path(filename_or_path: str) -> Path:
+    """Resolve a document reference (filename or full path) to an absolute Path.
+
+    Storage convention:
+    • DB stores **filenames only** (e.g. ``SMITH, JOHN RX.pdf``).
+    • Legacy records may still contain full absolute paths.
+
+    Resolution order:
+    1. If the value is already an absolute path that exists → use it.
+    2. Look in ``ocr_folder()`` root.
+    3. Search one level of subfolders (e.g. ``ocr_folder()/S/file.pdf``).
+    """
+    p = Path(filename_or_path)
+    if p.is_absolute() and p.exists():
+        return p
+    # Treat as filename — try OCR folder root first
+    base = p.name
+    root = ocr_folder()
+    candidate = root / base
+    if candidate.exists():
+        return candidate
+    # Search one level of subfolders
+    try:
+        for sub in root.iterdir():
+            if sub.is_dir():
+                candidate = sub / base
+                if candidate.exists():
+                    return candidate
+    except OSError:
+        pass
+    # Return the root-level path even if it doesn't exist (caller handles missing)
+    return root / base
+
+
 def fax_packets_dir() -> Path:
     return fax_root() / "FaxPackets"
 

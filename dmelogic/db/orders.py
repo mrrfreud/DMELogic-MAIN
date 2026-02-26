@@ -603,7 +603,7 @@ def update_order_fields(order_id: int, fields: dict, folder_path: Optional[str] 
         "doctor_directions", "notes", "patient_address", "tracking_number",
         "special_instructions", "rx_date", "order_date", "delivery_date", "pickup_date",
         "icd_code_1", "icd_code_2", "icd_code_3", "icd_code_4", "icd_code_5",
-        "prescriber_phone", "prescriber_fax"
+        "prescriber_phone", "prescriber_fax", "epaces_alert"
     }
     update_fields = {k: v for k, v in fields.items() if k in allowed_fields}
     

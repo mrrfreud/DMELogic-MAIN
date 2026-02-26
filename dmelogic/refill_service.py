@@ -88,10 +88,38 @@ def process_refill(
 
         # 2) Basic validations
         if src.refill_completed:
-            raise RefillError("This order has already been refilled for this cycle.")
+            # Check if the child refill still exists — if not, auto-clear the flag
+            cur = conn_orders.cursor()
+            cur.execute("SELECT COUNT(*) FROM orders WHERE parent_order_id = ?", (order_id,))
+            child_count = cur.fetchone()[0]
+            if child_count == 0:
+                # Stale flag — the refill was deleted; clear it and proceed
+                cur.execute(
+                    "UPDATE orders SET refill_completed = 0, refill_completed_at = NULL, is_locked = 0 WHERE id = ?",
+                    (order_id,),
+                )
+                conn_orders.commit()
+                src.refill_completed = False
+                src.is_locked = False
+                debug_log(f"Auto-cleared stale refill_completed/is_locked on order {order_id} (no child refills exist)")
+            else:
+                raise RefillError("This order has already been refilled for this cycle.")
         
         if src.is_locked:
-            raise RefillError("This order is locked and cannot be refilled.")
+            # Check if the child refill still exists — if not, auto-unlock
+            cur = conn_orders.cursor()
+            cur.execute("SELECT COUNT(*) FROM orders WHERE parent_order_id = ?", (order_id,))
+            child_count = cur.fetchone()[0]
+            if child_count == 0:
+                cur.execute(
+                    "UPDATE orders SET is_locked = 0 WHERE id = ?",
+                    (order_id,),
+                )
+                conn_orders.commit()
+                src.is_locked = False
+                debug_log(f"Auto-cleared stale is_locked on order {order_id} (no child refills exist)")
+            else:
+                raise RefillError("This order is locked and cannot be refilled.")
 
         if src.rx_date is None:
             raise RefillError("RX date is missing; cannot process refill.")

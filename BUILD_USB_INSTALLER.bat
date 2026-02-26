@@ -28,6 +28,10 @@ pyinstaller --noconfirm ^
     --hidden-import=PyQt6.QtGui ^
     --hidden-import=PyQt6.QtWidgets ^
     --hidden-import=reportlab ^
+    --hidden-import=dmelogic.scan ^
+    --hidden-import=win32com ^
+    --hidden-import=win32com.client ^
+    --hidden-import=pythoncom ^
     app_usb.py
 
 if errorlevel 1 (

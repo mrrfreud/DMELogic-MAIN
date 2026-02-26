@@ -479,6 +479,17 @@ class OrderEditorDialog(QDialog):
         self.special_instructions_text.setPlaceholderText("Enter delivery instructions for the driver...")
         layout.addWidget(self.special_instructions_text)
         
+        # Billing Alert (popup note shown when EPACES helper opens)
+        alert_label = QLabel("Billing Alert (popup when EPACES opens):")
+        alert_label.setStyleSheet("font-weight: bold; margin-top: 10px; color: #d63384;")
+        layout.addWidget(alert_label)
+        
+        self.epaces_alert_text = QTextEdit()
+        self.epaces_alert_text.setMaximumHeight(60)
+        self.epaces_alert_text.setPlaceholderText("Optional: leave a note for the biller (e.g. 'Call patient before billing')...")
+        self.epaces_alert_text.setStyleSheet("border: 1px solid #d63384; border-radius: 4px;")
+        layout.addWidget(self.epaces_alert_text)
+        
         return group
     
     def _create_reserved_rx_section(self) -> QGroupBox:
@@ -585,6 +596,11 @@ class OrderEditorDialog(QDialog):
         self.attach_doc_btn.clicked.connect(self._attach_document)
         docs_btn_row.addWidget(self.attach_doc_btn)
         
+        self.scan_doc_btn = QPushButton("🖨️ Scan")
+        self.scan_doc_btn.setToolTip("Scan a document from the scanner and attach to this order")
+        self.scan_doc_btn.clicked.connect(self._scan_document)
+        docs_btn_row.addWidget(self.scan_doc_btn)
+        
         docs_layout.addLayout(docs_btn_row)
         
         # Documents list
@@ -595,12 +611,15 @@ class OrderEditorDialog(QDialog):
         self.docs_list.setMinimumHeight(120)
         self.docs_list.setMaximumHeight(200)
         self.docs_list.verticalHeader().setVisible(False)
+        self.docs_list.verticalHeader().setDefaultSectionSize(26)
         docs_hdr = self.docs_list.horizontalHeader()
         docs_hdr.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
         docs_hdr.setMinimumSectionSize(150)
         docs_hdr.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
-        docs_hdr.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+        docs_hdr.setSectionResizeMode(2, QHeaderView.ResizeMode.Fixed)
+        self.docs_list.setColumnWidth(2, 28)
         self.docs_list.doubleClicked.connect(self._open_selected_document)
+        self.docs_list.cellClicked.connect(self._on_docs_cell_clicked)
         docs_layout.addWidget(self.docs_list)
         
         layout.addWidget(docs_group)
@@ -801,10 +820,15 @@ class OrderEditorDialog(QDialog):
         special_instructions_text = getattr(self.order, 'special_instructions', '') or ""
         self.special_instructions_text.setText(special_instructions_text)
         
+        # Billing alert (popup when EPACES helper opens)
+        epaces_alert_text = getattr(self.order, 'epaces_alert', '') or ""
+        self.epaces_alert_text.setText(epaces_alert_text)
+        
         # Connect text change signals to enable Save button
         self.doctor_directions.textChanged.connect(self._on_text_changed)
         self.notes_text.textChanged.connect(self._on_text_changed)
         self.special_instructions_text.textChanged.connect(self._on_text_changed)
+        self.epaces_alert_text.textChanged.connect(self._on_text_changed)
         
         # Update status combo with allowed transitions
         self._populate_status_combo()
@@ -1920,13 +1944,25 @@ class OrderEditorDialog(QDialog):
         if not self.order:
             return
         
-        from PyQt6.QtWidgets import QFileDialog
-        import shutil
-        from pathlib import Path
+        # Ask document type
+        from PyQt6.QtWidgets import QFileDialog, QInputDialog
+        
+        doc_types = ["RX / Prescription", "Delivery Confirmation"]
+        doc_type, ok = QInputDialog.getItem(
+            self, "Document Type",
+            "What type of document are you attaching?",
+            doc_types, 0, False
+        )
+        if not ok:
+            return
+        
+        is_delivery = (doc_type == "Delivery Confirmation")
+        db_col = 'attached_signed_ticket_files' if is_delivery else 'attached_rx_files'
+        type_label = "Delivery Confirmation" if is_delivery else "RX"
         
         file_path, _ = QFileDialog.getOpenFileName(
             self,
-            "Attach Document",
+            f"Attach {type_label}",
             "",
             "Documents (*.pdf *.png *.jpg *.jpeg *.tif *.tiff *.doc *.docx);;All Files (*.*)"
         )
@@ -1935,57 +1971,48 @@ class OrderEditorDialog(QDialog):
             return
         
         try:
-            # Create order documents folder (use root order ID for consistency)
-            from dmelogic.paths import fax_root
-            root_order_id = self.order.parent_order_id or self.order_id
-            order_docs_dir = fax_root() / "OrderDocuments" / f"ORD-{root_order_id:03d}"
-            order_docs_dir.mkdir(parents=True, exist_ok=True)
+            import os
+            from pathlib import Path
             
-            # Copy file to order folder
             src = Path(file_path)
-            dest = order_docs_dir / src.name
+            if not src.exists():
+                QMessageBox.warning(self, "File Not Found", f"The selected file does not exist:\n{file_path}")
+                return
             
-            # Handle duplicate names
-            counter = 1
-            while dest.exists():
-                stem = src.stem
-                suffix = src.suffix
-                dest = order_docs_dir / f"{stem}_{counter}{suffix}"
-                counter += 1
-            
-            shutil.copy2(src, dest)
+            # Store filename only (resolved at runtime via ocr_folder setting)
+            filename = src.name
             
             # Get all related order IDs (parent + all refills)
             related_order_ids = self._get_related_order_ids()
             
-            # Update attached_rx_files for ALL related orders
+            # Update the appropriate column for ALL related orders
             import sqlite3
             conn = sqlite3.connect(self.orders_db_path)
             cur = conn.cursor()
             
             attached_count = 0
             for order_id in related_order_ids:
-                cur.execute("SELECT attached_rx_files FROM orders WHERE id = ?", (order_id,))
+                cur.execute(f"SELECT {db_col} FROM orders WHERE id = ?", (order_id,))
                 row = cur.fetchone()
                 current_files = row[0] if row and row[0] else ""
                 
-                # Check if file already attached to this order
-                existing_files = [f.strip() for f in current_files.replace('\n', ';').split(';') if f.strip()]
-                if str(dest) not in existing_files:
-                    # Append new file path
+                # Check if file already attached to this order (compare by filename)
+                existing = [os.path.basename(f.strip()) for f in current_files.replace('\n', ';').split(';') if f.strip()]
+                if filename not in existing:
+                    # Append filename
                     if current_files:
-                        new_files = current_files + ";" + str(dest)
+                        new_files = current_files + ";" + filename
                     else:
-                        new_files = str(dest)
+                        new_files = filename
                     
-                    cur.execute("UPDATE orders SET attached_rx_files = ? WHERE id = ?", (new_files, order_id))
+                    cur.execute(f"UPDATE orders SET {db_col} = ? WHERE id = ?", (new_files, order_id))
                     attached_count += 1
             
             conn.commit()
             conn.close()
             
             # Auto-attach to patient profile as well
-            self._auto_attach_to_patient(str(dest), src.name)
+            self._auto_attach_to_patient(str(src), filename)
             
             self._refresh_documents_list()
             
@@ -1994,14 +2021,14 @@ class OrderEditorDialog(QDialog):
                 order_list = ", ".join([f"ORD-{oid:03d}" for oid in related_order_ids[:3]])
                 if len(related_order_ids) > 3:
                     order_list += f" (+{len(related_order_ids) - 3} more)"
-                msg = f"Document attached successfully:\n{dest.name}\n\n" \
+                msg = f"Document linked successfully:\n{src.name}\n\n" \
                       f"Linked to {len(related_order_ids)} orders: {order_list}\n" \
                       f"(Also linked to patient profile)"
             else:
-                msg = f"Document attached successfully:\n{dest.name}\n\n" \
+                msg = f"Document linked successfully:\n{src.name}\n\n" \
                       f"(Also linked to patient profile)"
             
-            QMessageBox.information(self, "Document Attached", msg)
+            QMessageBox.information(self, "Document Linked", msg)
             
         except Exception as e:
             QMessageBox.critical(
@@ -2009,6 +2036,87 @@ class OrderEditorDialog(QDialog):
                 "Error",
                 f"Failed to attach document:\n{e}"
             )
+    
+    def _scan_document(self):
+        """Scan a document from the scanner and attach to this order."""
+        if not self.order:
+            return
+        
+        # Ask document type
+        from PyQt6.QtWidgets import QInputDialog
+        
+        doc_types = ["RX / Prescription", "Delivery Confirmation"]
+        doc_type, ok = QInputDialog.getItem(
+            self, "Document Type",
+            "What type of document are you scanning?",
+            doc_types, 0, False
+        )
+        if not ok:
+            return
+        
+        is_delivery = (doc_type == "Delivery Confirmation")
+        db_col = 'attached_signed_ticket_files' if is_delivery else 'attached_rx_files'
+        type_label = "Delivery Confirmation" if is_delivery else "RX"
+        
+        # Build a suggested filename from patient name + order number
+        patient_name = ""
+        try:
+            last = self.order.patient_last_name or ""
+            first = self.order.patient_first_name or ""
+            patient_name = f"{last}, {first}".strip(", ")
+        except Exception:
+            pass
+        
+        order_num = self._format_order_number(self.order)
+        label = "DC" if is_delivery else "RX"
+        suggested = f"{patient_name} {order_num} {label}".strip()
+        
+        # Scan
+        from dmelogic.scan import scan_document
+        filename = scan_document(
+            parent_widget=self,
+            suggested_name=suggested,
+        )
+        
+        if not filename:
+            return  # User cancelled or error
+        
+        try:
+            import os
+            import sqlite3
+            
+            # Get all related order IDs
+            related_order_ids = self._get_related_order_ids()
+            
+            conn = sqlite3.connect(self.orders_db_path)
+            cur = conn.cursor()
+            
+            for order_id in related_order_ids:
+                cur.execute(f"SELECT {db_col} FROM orders WHERE id = ?", (order_id,))
+                row = cur.fetchone()
+                current_files = row[0] if row and row[0] else ""
+                existing = [os.path.basename(f.strip()) for f in current_files.replace('\n', ';').split(';') if f.strip()]
+                if filename not in existing:
+                    new_files = (current_files + ";" + filename) if current_files else filename
+                    cur.execute(f"UPDATE orders SET {db_col} = ? WHERE id = ?", (new_files, order_id))
+            
+            conn.commit()
+            conn.close()
+            
+            # Auto-attach to patient profile
+            from dmelogic.paths import resolve_document_path
+            resolved = resolve_document_path(filename)
+            self._auto_attach_to_patient(str(resolved), filename)
+            
+            self._refresh_documents_list()
+            
+            QMessageBox.information(
+                self, "Scan Complete",
+                f"Scanned and saved as {type_label}:\n{filename}"
+            )
+            
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Scan saved but failed to attach:\n{e}")
     
     def _get_related_order_ids(self) -> list:
         """Get all order IDs related to this order (parent + all refills in the family)."""
@@ -2111,7 +2219,7 @@ class OrderEditorDialog(QDialog):
             debug_log(f"⚠️ Failed to auto-attach document to patient: {e}")
     
     def _refresh_documents_list(self):
-        """Refresh the documents list for this order."""
+        """Refresh the documents list for this order (RX + Delivery Confirmation)."""
         self.docs_list.setRowCount(0)
         
         if not self.order:
@@ -2123,43 +2231,74 @@ class OrderEditorDialog(QDialog):
             
             conn = sqlite3.connect(self.orders_db_path)
             cur = conn.cursor()
-            cur.execute("SELECT attached_rx_files FROM orders WHERE id = ?", (self.order_id,))
+            cur.execute("SELECT attached_rx_files, attached_signed_ticket_files FROM orders WHERE id = ?", (self.order_id,))
             row = cur.fetchone()
             conn.close()
             
-            if not row or not row[0]:
+            if not row:
                 return
             
-            files = row[0].split(";")
-            self.docs_list.setRowCount(len(files))
+            # Collect all documents with their type
+            all_docs = []  # list of (filename, doc_type, db_col)
             
-            for i, file_path in enumerate(files):
-                file_path = file_path.strip()
-                if not file_path:
-                    continue
-                
+            rx_raw = row[0] if row[0] else ''
+            for f in str(rx_raw).replace(';', '\n').splitlines():
+                f = f.strip()
+                if f:
+                    all_docs.append((f, 'RX', 'attached_rx_files'))
+            
+            dc_raw = row[1] if row[1] else ''
+            for f in str(dc_raw).replace(';', '\n').splitlines():
+                f = f.strip()
+                if f:
+                    all_docs.append((f, 'Delivery', 'attached_signed_ticket_files'))
+            
+            if not all_docs:
+                return
+            
+            self.docs_list.setRowCount(len(all_docs))
+            
+            for i, (file_path, doc_type, db_col) in enumerate(all_docs):
                 p = Path(file_path)
                 name = p.name
-                ext = p.suffix.upper().replace(".", "")
                 
                 name_item = QTableWidgetItem(name)
                 name_item.setData(Qt.ItemDataRole.UserRole, file_path)
-                name_item.setToolTip(file_path)
+                # Store db_col in UserRole+1 so remove knows which column to update
+                name_item.setData(Qt.ItemDataRole.UserRole + 1, db_col)
                 
-                type_item = QTableWidgetItem(ext)
+                # Resolve path for tooltip
+                from dmelogic.paths import resolve_document_path
+                resolved = resolve_document_path(file_path)
+                name_item.setToolTip(str(resolved))
                 
-                # Remove button
-                remove_btn = QPushButton("❌")
-                remove_btn.setToolTip("Remove this document")
-                remove_btn.setMaximumWidth(30)
-                remove_btn.clicked.connect(lambda checked, fp=file_path: self._remove_document(fp))
+                type_item = QTableWidgetItem(doc_type)
+                
+                # Remove icon (plain text item — no widget overflow)
+                remove_item = QTableWidgetItem("✕")
+                remove_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                remove_item.setToolTip("Remove this document")
+                remove_item.setData(Qt.ItemDataRole.UserRole, file_path)
+                remove_item.setData(Qt.ItemDataRole.UserRole + 1, db_col)
                 
                 self.docs_list.setItem(i, 0, name_item)
                 self.docs_list.setItem(i, 1, type_item)
-                self.docs_list.setCellWidget(i, 2, remove_btn)
+                self.docs_list.setItem(i, 2, remove_item)
                 
         except Exception as e:
             debug_log(f"Error loading documents: {e}")
+    
+    def _on_docs_cell_clicked(self, row, col):
+        """Handle click on the remove (✕) column."""
+        if col != 2:
+            return
+        item = self.docs_list.item(row, 2)
+        if not item:
+            return
+        fp = item.data(Qt.ItemDataRole.UserRole)
+        db_col = item.data(Qt.ItemDataRole.UserRole + 1)
+        if fp and db_col:
+            self._remove_document(fp, db_col)
     
     def _open_selected_document(self):
         """Open the selected document."""
@@ -2171,24 +2310,24 @@ class OrderEditorDialog(QDialog):
         if not item:
             return
         
-        file_path = item.data(Qt.ItemDataRole.UserRole)
-        if not file_path:
+        file_ref = item.data(Qt.ItemDataRole.UserRole)
+        if not file_ref:
             return
         
         import os
-        from pathlib import Path
+        from dmelogic.paths import resolve_document_path
         
-        p = Path(file_path)
-        if not p.exists():
+        resolved = resolve_document_path(file_ref)
+        if not resolved.exists():
             QMessageBox.warning(
                 self,
                 "File Not Found",
-                f"Document not found:\n{file_path}"
+                f"Document not found:\n{resolved}"
             )
             return
         
         try:
-            os.startfile(str(p))
+            os.startfile(str(resolved))
         except Exception as e:
             QMessageBox.critical(
                 self,
@@ -2196,7 +2335,7 @@ class OrderEditorDialog(QDialog):
                 f"Failed to open document:\n{e}"
             )
     
-    def _remove_document(self, file_path: str):
+    def _remove_document(self, file_path: str, db_col: str = 'attached_rx_files'):
         """Remove a document from the order (keeps file on disk)."""
         reply = QMessageBox.question(
             self,
@@ -2214,13 +2353,13 @@ class OrderEditorDialog(QDialog):
             
             conn = sqlite3.connect(self.orders_db_path)
             cur = conn.cursor()
-            cur.execute("SELECT attached_rx_files FROM orders WHERE id = ?", (self.order_id,))
+            cur.execute(f"SELECT {db_col} FROM orders WHERE id = ?", (self.order_id,))
             row = cur.fetchone()
             
             if row and row[0]:
-                files = [f.strip() for f in row[0].split(";") if f.strip() != file_path]
+                files = [f.strip() for f in str(row[0]).replace(';', '\n').splitlines() if f.strip() and f.strip() != file_path]
                 new_files = ";".join(files) if files else None
-                cur.execute("UPDATE orders SET attached_rx_files = ? WHERE id = ?", (new_files, self.order_id))
+                cur.execute(f"UPDATE orders SET {db_col} = ? WHERE id = ?", (new_files, self.order_id))
                 conn.commit()
             
             conn.close()
@@ -2327,6 +2466,7 @@ class OrderEditorDialog(QDialog):
                 folder_path=self.folder_path,
                 parent=self
             )
+            self._show_billing_alert(dialog)
             self._show_rx_on_file_alert(dialog)
             dialog.exec()
         except Exception as e:
@@ -2361,6 +2501,7 @@ class OrderEditorDialog(QDialog):
                 folder_path=self.folder_path,
                 parent=self
             )
+            self._show_billing_alert(self._epaces_dialog)
             self._show_rx_on_file_alert(self._epaces_dialog)
             self._epaces_dialog.show()
             self._epaces_dialog.raise_()
@@ -2372,6 +2513,46 @@ class OrderEditorDialog(QDialog):
                 f"Failed to open ePACES helper:\n{e}"
             )
     
+    def _show_billing_alert(self, parent_dialog):
+        """Show a billing alert popup if one is set on this order."""
+        try:
+            alert_text = getattr(self.order, 'epaces_alert', None)
+            if not alert_text or not alert_text.strip():
+                return
+            alert_text = alert_text.strip()
+            msg = QMessageBox(parent_dialog)
+            msg.setIcon(QMessageBox.Icon.Warning)
+            msg.setWindowTitle("⚠️  Billing Alert")
+            msg.setText(
+                f"<b>Alert for {self._format_order_number(self.order)}:</b>"
+            )
+            msg.setInformativeText(alert_text)
+            msg.setStandardButtons(
+                QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Discard
+            )
+            ok_btn = msg.button(QMessageBox.StandardButton.Ok)
+            ok_btn.setText("Got it")
+            discard_btn = msg.button(QMessageBox.StandardButton.Discard)
+            discard_btn.setText("Clear Alert")
+            msg.setDefaultButton(QMessageBox.StandardButton.Ok)
+            msg.setStyleSheet("""
+                QMessageBox { font-size: 11pt; }
+                QMessageBox QLabel { min-width: 350px; }
+            """)
+            result = msg.exec()
+            if result == QMessageBox.StandardButton.Discard:
+                from dmelogic.db.orders import update_order_fields
+                update_order_fields(
+                    self.order.id,
+                    {"epaces_alert": None},
+                    folder_path=self.folder_path,
+                )
+                self.order.epaces_alert = None
+                self.epaces_alert_text.setPlainText("")
+                print(f"🔔 Billing alert cleared for ORD-{self.order.id}")
+        except Exception as e:
+            print(f"[Billing Alert check] {e}")
+
     def _show_rx_on_file_alert(self, parent_dialog):
         """Show an alert if this order has an RX on File."""
         try:
@@ -2678,6 +2859,12 @@ class OrderEditorDialog(QDialog):
             if new_special_instructions != orig_special_instructions:
                 fields_to_update["special_instructions"] = new_special_instructions if new_special_instructions else None
             
+            # Check billing alert change
+            new_epaces_alert = self.epaces_alert_text.toPlainText().strip()
+            orig_epaces_alert = (getattr(self.order, 'epaces_alert', '') or "").strip()
+            if new_epaces_alert != orig_epaces_alert:
+                fields_to_update["epaces_alert"] = new_epaces_alert if new_epaces_alert else None
+            
             # If patient was changed, add a note documenting it
             if getattr(self, '_patient_changed', False):
                 timestamp = datetime.now().strftime("%m/%d/%Y %H:%M")
@@ -2720,6 +2907,8 @@ class OrderEditorDialog(QDialog):
                     self.order.tracking_number = fields_to_update["tracking_number"]
                 if "special_instructions" in fields_to_update:
                     self.order.special_instructions = fields_to_update["special_instructions"]
+                if "epaces_alert" in fields_to_update:
+                    self.order.epaces_alert = fields_to_update["epaces_alert"]
                 # Update prescriber phone/fax in local order object
                 if "prescriber_phone" in fields_to_update:
                     self.order.prescriber_phone = fields_to_update["prescriber_phone"]

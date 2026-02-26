@@ -2,7 +2,7 @@
 ; Download Inno Setup from: https://jrsoftware.org/isdl.php
 
 #define MyAppName "DMELogic"
-#define MyAppVersion "2.0.20.191"
+#define MyAppVersion "2.0.20.192"
 #define MyAppPublisher "DME Solutions"
 #define MyAppExeName "DMELogic.exe"
 #define MyAppURL "https://github.com/mrrfreud/DMELogic-Refactored"

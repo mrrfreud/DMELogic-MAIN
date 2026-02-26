@@ -7,6 +7,29 @@ import json
 import shutil
 import zipfile
 import tempfile
+
+# ── Multi-user SQLite safety ────────────────────────────────────────
+# Wrap sqlite3.connect so every connection in the legacy code
+# automatically gets WAL mode + busy timeout for multi-user access.
+_original_sqlite3_connect = sqlite3.connect
+
+def _safe_sqlite3_connect(*args, **kwargs):
+    """sqlite3.connect wrapper that enables WAL + busy_timeout on every connection."""
+    if 'timeout' not in kwargs:
+        kwargs['timeout'] = 10
+    conn = _original_sqlite3_connect(*args, **kwargs)
+    try:
+        db_name = str(args[0]) if args else ""
+        if db_name != ":memory:":
+            conn.execute("PRAGMA journal_mode = WAL;")
+            conn.execute("PRAGMA busy_timeout = 5000;")
+            conn.execute("PRAGMA synchronous = NORMAL;")
+    except Exception:
+        pass
+    return conn
+
+sqlite3.connect = _safe_sqlite3_connect
+# ────────────────────────────────────────────────────────────────────
 from datetime import datetime, timedelta
 from pathlib import Path
 import pytesseract
@@ -34,7 +57,7 @@ from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QH
                              QDateEdit, QFormLayout, QStyledItemDelegate, QStyle, QProgressDialog,
                              QSizePolicy, QDialogButtonBox, QAbstractItemView,
                              QStyleOptionViewItem, QInputDialog, QMenu)
-from PyQt6.QtGui import QPixmap, QImage, QAction, QPalette, QColor, QFont, QPainter, QPen, QBrush, QPolygon
+from PyQt6.QtGui import QPixmap, QImage, QAction, QPalette, QColor, QFont, QPainter, QPen, QBrush, QPolygon, QIcon, QIcon
 from PyQt6.QtCore import Qt, QTimer, QThread, pyqtSignal, QTime, QDateTime, QRect, QRectF, QDate, QPoint, QSize, pyqtProperty, QPropertyAnimation, QEasingCurve, QObject, QEvent
 from PyQt6.QtPrintSupport import QPrinter, QPrintDialog
 import subprocess
@@ -1210,6 +1233,43 @@ class YesNoDelegate(QStyledItemDelegate):
     def setModelData(self, editor, model, index):
         text = "Yes" if editor.currentIndex() == 1 else "No"
         model.setData(index, text, Qt.ItemDataRole.DisplayRole)
+
+
+class ColorPreservingDelegate(QStyledItemDelegate):
+    """Delegate that paints text with the item's ForegroundRole color,
+    ignoring the QSS stylesheet color so programmatic setForeground() works."""
+
+    def paint(self, painter, option, index):
+        # Let the base draw the background / selection highlight
+        self.initStyleOption(option, index)
+        style = option.widget.style() if option.widget else QApplication.style()
+
+        # Draw background only (no text yet)
+        painter.save()
+        style.drawPrimitive(style.PrimitiveElement.PE_PanelItemViewItem, option, painter, option.widget)
+
+        # Determine text color: honour ForegroundRole if set, else fall back to palette
+        fg = index.data(Qt.ItemDataRole.ForegroundRole)
+        if fg and isinstance(fg, QBrush):
+            painter.setPen(fg.color())
+        elif fg and isinstance(fg, QColor):
+            painter.setPen(fg)
+        elif option.state & style.StateFlag.State_Selected:
+            painter.setPen(option.palette.color(QPalette.ColorRole.HighlightedText))
+        else:
+            painter.setPen(option.palette.color(QPalette.ColorRole.Text))
+
+        # Honour the item's font (bold / italic)
+        font_data = index.data(Qt.ItemDataRole.FontRole)
+        if font_data and isinstance(font_data, QFont):
+            painter.setFont(font_data)
+        else:
+            painter.setFont(option.font)
+
+        text = index.data(Qt.ItemDataRole.DisplayRole) or ""
+        text_rect = option.rect.adjusted(10, 0, -4, 0)  # match padding
+        painter.drawText(text_rect, Qt.AlignmentFlag.AlignCenter | Qt.AlignmentFlag.AlignVCenter, str(text))
+        painter.restore()
 
 class QuickDeliveryTicketDialog(QDialog):
     """Simple, fillable Delivery Ticket generator without creating an order.
@@ -2855,12 +2915,12 @@ class NewOrderDialog(QDialog):
         attach_layout.addWidget(self.rx_list)
         card_layout.addWidget(attach_group)
 
-        # Signed Delivery Ticket Attachments
-        card_layout.addWidget(self.make_section_header("🖊️ Signed Delivery Ticket(s)"))
+        # Delivery Confirmation Attachments
+        card_layout.addWidget(self.make_section_header("📦 Delivery Confirmation"))
         signed_group = QGroupBox()
         signed_layout = QVBoxLayout(signed_group)
         signed_btn_row = QHBoxLayout()
-        self.attach_signed_btn = QPushButton("📎 Attach Signed Ticket")
+        self.attach_signed_btn = QPushButton("📎 Attach Delivery Confirmation")
         self.remove_signed_btn = QPushButton("🗑️ Remove Selected")
         self.view_signed_btn = QPushButton("👁️ View")
         self.attach_signed_btn.clicked.connect(self.attach_signed_ticket_file)
@@ -4558,8 +4618,8 @@ class NewOrderDialog(QDialog):
             icd3 = (self.icd_code_3.text() or '').strip()
             icd4 = (self.icd_code_4.text() or '').strip()
             icd5 = (self.icd_code_5.text() or '').strip()
-            attached_rx = "\n".join(self._attached_rx_files) if getattr(self, '_attached_rx_files', None) else None
-            attached_signed = "\n".join(self._attached_signed_tickets) if getattr(self, '_attached_signed_tickets', None) else None
+            attached_rx = ";".join(os.path.basename(f) for f in self._attached_rx_files) if getattr(self, '_attached_rx_files', None) else None
+            attached_signed = ";".join(os.path.basename(f) for f in self._attached_signed_tickets) if getattr(self, '_attached_signed_tickets', None) else None
 
             # Patient labels (best effort)
             patient_dob = (self.patient_dob_label.text() or '').strip()
@@ -5406,29 +5466,31 @@ class NewOrderDialog(QDialog):
             except Exception:
                 pass
 
-            # Attached RX files
+            # Attached RX files (stored as filenames; resolve for display)
             try:
                 self._attached_rx_files = []
                 self.rx_list.clear()
                 if attached_rx_files:
-                    for p in str(attached_rx_files).splitlines():
+                    for p in str(attached_rx_files).replace(';', '\n').splitlines():
                         p = p.strip()
                         if p:
-                            self._attached_rx_files.append(p)
-                            self.rx_list.addItem(p)
+                            fname = os.path.basename(p)
+                            self._attached_rx_files.append(fname)
+                            self.rx_list.addItem(fname)
             except Exception:
                 pass
 
-            # Signed Delivery Ticket files
+            # Delivery Confirmation files
             try:
                 self._attached_signed_tickets = []
                 self.signed_list.clear()
                 if attached_signed_ticket_files:
-                    for p in str(attached_signed_ticket_files).splitlines():
+                    for p in str(attached_signed_ticket_files).replace(';', '\n').splitlines():
                         p = p.strip()
                         if p:
-                            self._attached_signed_tickets.append(p)
-                            self.signed_list.addItem(p)
+                            fname = os.path.basename(p)
+                            self._attached_signed_tickets.append(fname)
+                            self.signed_list.addItem(fname)
             except Exception:
                 pass
         except Exception as e:
@@ -5522,9 +5584,10 @@ class NewOrderDialog(QDialog):
             if not paths:
                 return
             for p in paths:
-                if p not in self._attached_rx_files:
-                    self._attached_rx_files.append(p)
-                    self.rx_list.addItem(p)
+                fname = os.path.basename(p)
+                if fname not in self._attached_rx_files:
+                    self._attached_rx_files.append(fname)
+                    self.rx_list.addItem(fname)
         except Exception as e:
             print(f"Dialog: attach_rx_file failed: {e}")
 
@@ -5543,14 +5606,15 @@ class NewOrderDialog(QDialog):
             item = self.rx_list.currentItem()
             if not item:
                 return
-            path = item.text()
-            if os.path.exists(path):
+            from dmelogic.paths import resolve_document_path
+            resolved = resolve_document_path(item.text())
+            if resolved.exists():
                 try:
-                    os.startfile(path)
+                    os.startfile(str(resolved))
                 except Exception:
                     pass
             else:
-                QMessageBox.information(self, "RX File", f"File not found:\n{path}")
+                QMessageBox.information(self, "RX File", f"File not found:\n{resolved}")
         except Exception as e:
             print(f"Dialog: view_selected_rx failed: {e}")
 
@@ -5559,16 +5623,17 @@ class NewOrderDialog(QDialog):
         try:
             paths, _ = QFileDialog.getOpenFileNames(
                 self,
-                "Select signed delivery ticket file(s)",
+                "Select delivery confirmation file(s)",
                 self.parent.folder_path if hasattr(self.parent, 'folder_path') else os.getcwd(),
                 "Documents (*.pdf *.jpg *.jpeg *.png *.tif *.tiff);;All Files (*.*)"
             )
             if not paths:
                 return
             for p in paths:
-                if p not in self._attached_signed_tickets:
-                    self._attached_signed_tickets.append(p)
-                    self.signed_list.addItem(p)
+                fname = os.path.basename(p)
+                if fname not in self._attached_signed_tickets:
+                    self._attached_signed_tickets.append(fname)
+                    self.signed_list.addItem(fname)
         except Exception as e:
             print(f"Dialog: attach_signed_ticket_file failed: {e}")
 
@@ -5587,14 +5652,15 @@ class NewOrderDialog(QDialog):
             item = self.signed_list.currentItem()
             if not item:
                 return
-            path = item.text()
-            if os.path.exists(path):
+            from dmelogic.paths import resolve_document_path
+            resolved = resolve_document_path(item.text())
+            if resolved.exists():
                 try:
-                    os.startfile(path)
+                    os.startfile(str(resolved))
                 except Exception:
                     pass
             else:
-                QMessageBox.information(self, "Signed Ticket", f"File not found:\n{path}")
+                QMessageBox.information(self, "Delivery Confirmation", f"File not found:\n{resolved}")
         except Exception as e:
             print(f"Dialog: view_selected_signed_ticket failed: {e}")
 
@@ -5624,8 +5690,11 @@ class SettingsDialog(QDialog):
         self.create_general_tab()
         self.create_appearance_tab()
         self.create_pdf_viewer_tab()
+        self.create_scanner_tab()
         self.create_backup_tab()
         self.create_ringcentral_tab()
+        self.create_azure_tab()
+        self.create_openai_tab()
         
         layout.addWidget(self.tab_widget)
         
@@ -6011,6 +6080,208 @@ class SettingsDialog(QDialog):
         # Update backup status display
         QTimer.singleShot(500, self.update_backup_status_display)
     
+    def create_scanner_tab(self):
+        """Scanner hardware settings."""
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+
+        # --- Scanner Mode ---
+        mode_group = QGroupBox("Scanner Mode")
+        mode_layout = QVBoxLayout(mode_group)
+
+        self.scanner_mode_combo = QComboBox()
+        self.scanner_mode_combo.addItems(["Auto", "WIA Only", "File Picker"])
+        mode_desc = QLabel(
+            "• <b>Auto</b> — tries WIA first, then falls back to Scanner App<br>"
+            "• <b>WIA Only</b> — only use scanners with WIA drivers<br>"
+            "• <b>File Picker</b> — launch your scanner software "
+            "(e.g. ScanSnap Home) and auto-detect the scanned file"
+        )
+        mode_desc.setWordWrap(True)
+        mode_desc.setStyleSheet("color: #888; font-size: 11px; margin-top: 4px;")
+
+        mode_h = QHBoxLayout()
+        mode_h.addWidget(QLabel("Mode:"))
+        mode_h.addWidget(self.scanner_mode_combo, 1)
+        mode_layout.addLayout(mode_h)
+        mode_layout.addWidget(mode_desc)
+
+        # --- Scanner Application (for non-WIA scanners) ---
+        self.scanner_app_group = QGroupBox("Scanner Application (ScanSnap, etc.)")
+        app_layout = QGridLayout(self.scanner_app_group)
+
+        self.scanner_app_edit = QLineEdit()
+        self.scanner_app_edit.setPlaceholderText("Path to scanner software (e.g. ScanSnap Home.exe)")
+        browse_app_btn = QPushButton("Browse…")
+        browse_app_btn.setFixedWidth(80)
+        browse_app_btn.clicked.connect(self._browse_scanner_app)
+
+        self.scanner_output_folder_edit = QLineEdit()
+        self.scanner_output_folder_edit.setPlaceholderText("Folder where scanner saves files")
+        browse_output_btn = QPushButton("Browse…")
+        browse_output_btn.setFixedWidth(80)
+        browse_output_btn.clicked.connect(self._browse_scanner_output_folder)
+
+        app_desc = QLabel(
+            "Set the <b>Output folder</b> where your scanner saves files. "
+            "When you click <b>Scan</b>, DMELogic watches that folder and "
+            "auto-detects new scans. Scanner app path is optional — "
+            "for ScanSnap, just use the physical Scan button."
+        )
+        app_desc.setWordWrap(True)
+        app_desc.setStyleSheet("color: #888; font-size: 11px; margin-top: 2px;")
+
+        app_layout.addWidget(QLabel("Scanner app:"), 0, 0)
+        app_layout.addWidget(self.scanner_app_edit, 0, 1)
+        app_layout.addWidget(browse_app_btn, 0, 2)
+        app_layout.addWidget(QLabel("Output folder:"), 1, 0)
+        app_layout.addWidget(self.scanner_output_folder_edit, 1, 1)
+        app_layout.addWidget(browse_output_btn, 1, 2)
+        app_layout.addWidget(app_desc, 2, 0, 1, 3)
+
+        # --- WIA Scanner Device ---
+        self.scanner_device_group = QGroupBox("WIA Scanner Device")
+        device_layout = QGridLayout(self.scanner_device_group)
+
+        self.scanner_combo = QComboBox()
+        self.scanner_combo.setMinimumWidth(280)
+        self.scanner_combo.addItem("(Ask every time)", "")
+
+        refresh_btn = QPushButton("🔄 Refresh")
+        refresh_btn.setFixedWidth(90)
+        refresh_btn.clicked.connect(self._refresh_scanner_list)
+
+        test_btn = QPushButton("🖨️ Test Scan")
+        test_btn.setFixedWidth(100)
+        test_btn.clicked.connect(self._test_scan)
+
+        device_layout.addWidget(QLabel("Default scanner:"), 0, 0)
+        device_layout.addWidget(self.scanner_combo, 0, 1)
+        device_layout.addWidget(refresh_btn, 0, 2)
+        device_layout.addWidget(test_btn, 1, 2)
+
+        self.scanner_status_label = QLabel("")
+        self.scanner_status_label.setStyleSheet("color: #888;")
+        device_layout.addWidget(self.scanner_status_label, 1, 0, 1, 2)
+
+        # --- Scan Output ---
+        output_group = QGroupBox("Scan Output")
+        output_layout = QGridLayout(output_group)
+
+        self.scan_format_combo = QComboBox()
+        self.scan_format_combo.addItems(["PDF", "PNG"])
+
+        self.scan_folder_edit = QLineEdit()
+        self.scan_folder_edit.setPlaceholderText("(uses default OCR folder)")
+        browse_scan_folder_btn = QPushButton("Browse…")
+        browse_scan_folder_btn.clicked.connect(self._browse_scan_folder)
+
+        output_layout.addWidget(QLabel("Output format:"), 0, 0)
+        output_layout.addWidget(self.scan_format_combo, 0, 1, 1, 2)
+        output_layout.addWidget(QLabel("Save folder:"), 1, 0)
+        output_layout.addWidget(self.scan_folder_edit, 1, 1)
+        output_layout.addWidget(browse_scan_folder_btn, 1, 2)
+
+        layout.addWidget(mode_group)
+        layout.addWidget(self.scanner_app_group)
+        layout.addWidget(self.scanner_device_group)
+        layout.addWidget(output_group)
+        layout.addStretch()
+
+        self.tab_widget.addTab(tab, "🖨️ Scanner")
+
+        # Toggle section visibility based on mode
+        self.scanner_mode_combo.currentTextChanged.connect(self._on_scanner_mode_changed)
+        self._on_scanner_mode_changed(self.scanner_mode_combo.currentText())
+
+        # Populate scanner list in background
+        QTimer.singleShot(300, self._refresh_scanner_list)
+
+    # ---- Scanner helpers ----
+    def _on_scanner_mode_changed(self, mode: str):
+        """Show/hide Scanner App vs WIA sections based on selected mode."""
+        is_wia = mode == "WIA Only"
+        is_file = mode == "File Picker"
+        # WIA section: show for Auto and WIA Only
+        self.scanner_device_group.setVisible(not is_file)
+        # Scanner App section: show for Auto and File Picker
+        self.scanner_app_group.setVisible(not is_wia)
+
+    def _refresh_scanner_list(self):
+        """Enumerate WIA scanner devices and populate combo."""
+        saved_id = self.scanner_combo.currentData() or self.settings.get('scanner_device_id', '')
+        self.scanner_combo.clear()
+        self.scanner_combo.addItem("(Ask every time)", "")
+
+        try:
+            import win32com.client
+            import pythoncom
+            pythoncom.CoInitialize()
+            manager = win32com.client.Dispatch("WIA.DeviceManager")
+            count = manager.DeviceInfos.Count
+            if count == 0:
+                self.scanner_status_label.setText("No scanners detected")
+            else:
+                self.scanner_status_label.setText(f"{count} scanner(s) found")
+            for i in range(1, count + 1):
+                info = manager.DeviceInfos.Item(i)
+                name = info.Properties("Name").Value
+                dev_id = info.DeviceID
+                self.scanner_combo.addItem(name, dev_id)
+            pythoncom.CoUninitialize()
+        except Exception as e:
+            self.scanner_status_label.setText(f"Could not list scanners: {e}")
+
+        # Re-select saved device
+        if saved_id:
+            idx = self.scanner_combo.findData(saved_id)
+            if idx >= 0:
+                self.scanner_combo.setCurrentIndex(idx)
+
+    def _browse_scan_folder(self):
+        folder = QFileDialog.getExistingDirectory(self, "Select Scan Save Folder",
+                                                  self.scan_folder_edit.text())
+        if folder:
+            self.scan_folder_edit.setText(folder)
+
+    def _browse_scanner_app(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Select Scanner Application",
+            self.scanner_app_edit.text(),
+            "Executables (*.exe);;All Files (*)",
+        )
+        if path:
+            self.scanner_app_edit.setText(path)
+
+    def _browse_scanner_output_folder(self):
+        folder = QFileDialog.getExistingDirectory(
+            self, "Select Scanner Output Folder",
+            self.scanner_output_folder_edit.text(),
+        )
+        if folder:
+            self.scanner_output_folder_edit.setText(folder)
+
+    def _test_scan(self):
+        """Perform a quick test scan with the selected scanner."""
+        try:
+            from dmelogic.scan import scan_document
+            dev_id = self.scanner_combo.currentData() or None
+            fmt = self.scan_format_combo.currentText()  # PDF or PNG
+            result = scan_document(
+                parent_widget=self,
+                suggested_name="TestScan",
+                save_folder=self.scan_folder_edit.text() or None,
+                as_pdf=(fmt == "PDF"),
+                device_id=dev_id,
+            )
+            if result:
+                QMessageBox.information(self, "Test Scan", f"Scan successful!\n\nSaved as: {result}")
+            else:
+                # user cancelled or error already shown
+                pass
+        except Exception as e:
+            QMessageBox.warning(self, "Test Scan", f"Test scan failed:\n{e}")
+
     def create_ringcentral_tab(self):
         """RingCentral integration settings for SMS, Fax, and Call."""
         try:
@@ -6033,6 +6304,208 @@ class SettingsDialog(QDialog):
             layout.addStretch()
             self.tab_widget.addTab(tab, "RingCentral")
     
+    def create_azure_tab(self):
+        """Azure Document Intelligence OCR settings."""
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+
+        # API Settings
+        api_group = QGroupBox("Azure Document Intelligence")
+        api_layout = QGridLayout(api_group)
+
+        info_label = QLabel(
+            "Azure AI Document Intelligence provides high-quality OCR\n"
+            "for scanned and handwritten prescriptions.\n"
+            "Enter your Azure credentials below."
+        )
+        info_label.setStyleSheet("color: #888; font-size: 11px; margin-bottom: 6px;")
+        api_layout.addWidget(info_label, 0, 0, 1, 2)
+
+        api_layout.addWidget(QLabel("Endpoint URL:"), 1, 0)
+        self.azure_endpoint = QLineEdit()
+        self.azure_endpoint.setPlaceholderText("https://RESOURCE.cognitiveservices.azure.com/")
+        api_layout.addWidget(self.azure_endpoint, 1, 1)
+
+        api_layout.addWidget(QLabel("API Key:"), 2, 0)
+        self.azure_key = QLineEdit()
+        self.azure_key.setEchoMode(QLineEdit.EchoMode.Password)
+        self.azure_key.setPlaceholderText("Enter your Azure API key")
+        api_layout.addWidget(self.azure_key, 2, 1)
+
+        # Show/hide key toggle
+        self.azure_show_key = QPushButton("👁 Show")
+        self.azure_show_key.setFixedWidth(70)
+        self.azure_show_key.setCheckable(True)
+        self.azure_show_key.toggled.connect(
+            lambda checked: (
+                self.azure_key.setEchoMode(
+                    QLineEdit.EchoMode.Normal if checked else QLineEdit.EchoMode.Password
+                ),
+                self.azure_show_key.setText("🔒 Hide" if checked else "👁 Show"),
+            )
+        )
+        api_layout.addWidget(self.azure_show_key, 2, 2)
+
+        # Test button
+        test_layout = QHBoxLayout()
+        self.azure_test_btn = QPushButton("🔗 Test Connection")
+        self.azure_test_btn.clicked.connect(self._test_azure_connection)
+        self.azure_status_label = QLabel("")
+        test_layout.addWidget(self.azure_test_btn)
+        test_layout.addWidget(self.azure_status_label)
+        test_layout.addStretch()
+        api_layout.addLayout(test_layout, 3, 0, 1, 3)
+
+        # Usage info
+        usage_group = QGroupBox("How It Works")
+        usage_layout = QVBoxLayout(usage_group)
+        usage_text = QLabel(
+            "When configured, Azure OCR is used automatically for scanned\n"
+            "and image-only PDFs (e.g., faxed or handwritten prescriptions).\n\n"
+            "• Smart Rx Import will try native text extraction first\n"
+            "• If no text is found, Azure OCR is used (best quality)\n"
+            "• Falls back to local Tesseract if Azure is unavailable\n\n"
+            "Azure charges per page analyzed (~$0.001/page for Read model)."
+        )
+        usage_text.setStyleSheet("color: #aaa; font-size: 11px;")
+        usage_text.setWordWrap(True)
+        usage_layout.addWidget(usage_text)
+
+        layout.addWidget(api_group)
+        layout.addWidget(usage_group)
+        layout.addStretch()
+
+        self.tab_widget.addTab(tab, "Azure OCR")
+
+    def _test_azure_connection(self):
+        """Test Azure Document Intelligence connection."""
+        endpoint = self.azure_endpoint.text().strip()
+        api_key = self.azure_key.text().strip()
+        if not endpoint or not api_key:
+            self.azure_status_label.setText("❌ Enter endpoint and API key first.")
+            self.azure_status_label.setStyleSheet("color: #EF4444;")
+            return
+        self.azure_status_label.setText("⏳ Testing...")
+        self.azure_status_label.setStyleSheet("color: #F59E0B;")
+        QApplication.processEvents()
+        try:
+            from dmelogic.services.azure_ocr import AzureOCR
+            ocr = AzureOCR(endpoint=endpoint, api_key=api_key)
+            ok, msg = ocr.test_connection()
+            if ok:
+                self.azure_status_label.setText("✅ " + msg)
+                self.azure_status_label.setStyleSheet("color: #22C55E;")
+            else:
+                self.azure_status_label.setText("❌ " + msg)
+                self.azure_status_label.setStyleSheet("color: #EF4444;")
+        except Exception as e:
+            self.azure_status_label.setText(f"❌ {e}")
+            self.azure_status_label.setStyleSheet("color: #EF4444;")
+
+    def create_openai_tab(self):
+        """OpenAI API settings for AI-powered Rx parsing."""
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+
+        # API Settings
+        api_group = QGroupBox("OpenAI API — AI Rx Parser")
+        api_layout = QGridLayout(api_group)
+
+        info_label = QLabel(
+            "When all built-in Rx parsers fail to extract data,\n"
+            "the AI parser uses OpenAI GPT to automatically read\n"
+            "any prescription format — no manual coding needed."
+        )
+        info_label.setStyleSheet("color: #888; font-size: 11px; margin-bottom: 6px;")
+        api_layout.addWidget(info_label, 0, 0, 1, 2)
+
+        api_layout.addWidget(QLabel("API Key:"), 1, 0)
+        self.openai_key = QLineEdit()
+        self.openai_key.setEchoMode(QLineEdit.EchoMode.Password)
+        self.openai_key.setPlaceholderText("sk-...")
+        api_layout.addWidget(self.openai_key, 1, 1)
+
+        # Show/hide key toggle
+        self.openai_show_key = QPushButton("👁 Show")
+        self.openai_show_key.setFixedWidth(70)
+        self.openai_show_key.setCheckable(True)
+        self.openai_show_key.toggled.connect(
+            lambda checked: (
+                self.openai_key.setEchoMode(
+                    QLineEdit.EchoMode.Normal if checked else QLineEdit.EchoMode.Password
+                ),
+                self.openai_show_key.setText("🔒 Hide" if checked else "👁 Show"),
+            )
+        )
+        api_layout.addWidget(self.openai_show_key, 1, 2)
+
+        api_layout.addWidget(QLabel("Model:"), 2, 0)
+        self.openai_model = QComboBox()
+        self.openai_model.addItems(["gpt-4o-mini", "gpt-4o", "gpt-4.1-mini", "gpt-4.1-nano"])
+        self.openai_model.setCurrentText("gpt-4o-mini")
+        api_layout.addWidget(self.openai_model, 2, 1)
+
+        # Test button
+        test_layout = QHBoxLayout()
+        self.openai_test_btn = QPushButton("🔗 Test Connection")
+        self.openai_test_btn.clicked.connect(self._test_openai_connection)
+        self.openai_status_label = QLabel("")
+        test_layout.addWidget(self.openai_test_btn)
+        test_layout.addWidget(self.openai_status_label)
+        test_layout.addStretch()
+        api_layout.addLayout(test_layout, 3, 0, 1, 3)
+
+        # Usage info
+        usage_group = QGroupBox("How It Works")
+        usage_layout = QVBoxLayout(usage_group)
+        usage_text = QLabel(
+            "The AI parser is a LAST-RESORT fallback — it only runs when\n"
+            "all built-in regex parsers fail to find prescription data.\n\n"
+            "• Smart Rx Import tries 5 built-in parsers first (instant, free)\n"
+            "• If none match, the OCR text is sent to OpenAI GPT\n"
+            "• GPT extracts patient, prescriber, items, and ICD codes\n"
+            "• Works with ANY format — handwritten, faxed, portal, e-Rx\n\n"
+            "Cost: ~$0.001 per prescription (gpt-4o-mini).\n"
+            "Leave API key blank to disable the AI fallback."
+        )
+        usage_text.setStyleSheet("color: #aaa; font-size: 11px;")
+        usage_text.setWordWrap(True)
+        usage_layout.addWidget(usage_text)
+
+        layout.addWidget(api_group)
+        layout.addWidget(usage_group)
+        layout.addStretch()
+
+        self.tab_widget.addTab(tab, "AI Parser")
+
+    def _test_openai_connection(self):
+        """Test OpenAI API connection."""
+        api_key = self.openai_key.text().strip()
+        if not api_key:
+            self.openai_status_label.setText("❌ Enter an API key first.")
+            self.openai_status_label.setStyleSheet("color: #EF4444;")
+            return
+        self.openai_status_label.setText("⏳ Testing...")
+        self.openai_status_label.setStyleSheet("color: #F59E0B;")
+        QApplication.processEvents()
+        try:
+            from openai import OpenAI
+            client = OpenAI(api_key=api_key)
+            resp = client.chat.completions.create(
+                model=self.openai_model.currentText(),
+                messages=[{"role": "user", "content": "Reply with OK"}],
+                max_tokens=5,
+            )
+            if resp.choices:
+                self.openai_status_label.setText("✅ Connected successfully")
+                self.openai_status_label.setStyleSheet("color: #22C55E;")
+            else:
+                self.openai_status_label.setText("❌ No response from API")
+                self.openai_status_label.setStyleSheet("color: #EF4444;")
+        except Exception as e:
+            self.openai_status_label.setText(f"❌ {e}")
+            self.openai_status_label.setStyleSheet("color: #EF4444;")
+
     def choose_accent_color(self):
         """Open color dialog for accent color selection."""
         color = QColorDialog.getColor(QColor(self.accent_color), self)
@@ -6298,17 +6771,55 @@ class SettingsDialog(QDialog):
         self.mouse_wheel_zoom.setChecked(self.settings.get('mouse_wheel_zoom', True))
         self.page_turn_animation.setChecked(self.settings.get('page_turn_animation', False))
         
+        # Scanner settings
+        self.scanner_mode_combo.setCurrentText(self.settings.get('scanner_mode', 'Auto'))
+        scanner_id = self.settings.get('scanner_device_id', '')
+        if scanner_id:
+            idx = self.scanner_combo.findData(scanner_id)
+            if idx >= 0:
+                self.scanner_combo.setCurrentIndex(idx)
+        self.scan_format_combo.setCurrentText(self.settings.get('scan_format', 'PDF'))
+        self.scan_folder_edit.setText(self.settings.get('scan_folder', ''))
+        self.scanner_app_edit.setText(self.settings.get('scanner_app_path', ''))
+        self.scanner_output_folder_edit.setText(self.settings.get('scanner_output_folder', ''))
+
         # Backup settings (with new defaults: enabled by default)
         self.auto_backup_enabled.setChecked(self.settings.get('auto_backup_enabled', True))
         self.daily_backup_enabled.setChecked(self.settings.get('daily_backup_enabled', True))
         self.weekly_backup_enabled.setChecked(self.settings.get('weekly_backup_enabled', True))
         backup_location = self.settings.get('backup_location', os.path.abspath(BACKUP_FOLDER))
         self.backup_location.setText(backup_location)
+
+        # Azure OCR settings
+        self.azure_endpoint.setText(self.settings.get('azure_di_endpoint', ''))
+        self.azure_key.setText(self.settings.get('azure_di_key', ''))
+
+        # OpenAI AI Parser settings
+        self.openai_key.setText(self.settings.get('openai_api_key', ''))
+        self.openai_model.setCurrentText(self.settings.get('openai_model', 'gpt-4o-mini'))
     
     def apply_settings(self):
         """Apply settings without closing dialog."""
         self.save_settings()
         self.parent_app.apply_settings(self.settings)
+        # Reconfigure Azure OCR singleton immediately
+        try:
+            azure_endpoint = self.settings.get('azure_di_endpoint', '')
+            azure_key = self.settings.get('azure_di_key', '')
+            if azure_endpoint and azure_key:
+                from dmelogic.services.azure_ocr import configure_azure_ocr
+                configure_azure_ocr(azure_endpoint, azure_key)
+        except Exception:
+            pass
+        # Reconfigure OpenAI AI Parser singleton immediately
+        try:
+            openai_key = self.settings.get('openai_api_key', '')
+            openai_model = self.settings.get('openai_model', 'gpt-4o-mini')
+            if openai_key:
+                from dmelogic.services.ai_rx_parser import configure_openai
+                configure_openai(openai_key, openai_model)
+        except Exception:
+            pass
     
     def save_settings(self):
         """Save settings from dialog controls."""
@@ -6337,11 +6848,27 @@ class SettingsDialog(QDialog):
         self.settings['mouse_wheel_zoom'] = self.mouse_wheel_zoom.isChecked()
         self.settings['page_turn_animation'] = self.page_turn_animation.isChecked()
         
+        # Scanner settings
+        self.settings['scanner_mode'] = self.scanner_mode_combo.currentText()
+        self.settings['scanner_device_id'] = self.scanner_combo.currentData() or ''
+        self.settings['scan_format'] = self.scan_format_combo.currentText()
+        self.settings['scan_folder'] = self.scan_folder_edit.text()
+        self.settings['scanner_app_path'] = self.scanner_app_edit.text()
+        self.settings['scanner_output_folder'] = self.scanner_output_folder_edit.text()
+
         # Backup settings
         self.settings['auto_backup_enabled'] = self.auto_backup_enabled.isChecked()
         self.settings['daily_backup_enabled'] = self.daily_backup_enabled.isChecked()
         self.settings['weekly_backup_enabled'] = self.weekly_backup_enabled.isChecked()
         self.settings['backup_location'] = self.backup_location.text()
+
+        # Azure OCR settings
+        self.settings['azure_di_endpoint'] = self.azure_endpoint.text().strip()
+        self.settings['azure_di_key'] = self.azure_key.text().strip()
+
+        # OpenAI AI Parser settings
+        self.settings['openai_api_key'] = self.openai_key.text().strip()
+        self.settings['openai_model'] = self.openai_model.currentText()
     
     def reset_to_defaults(self):
         """Reset all settings to default values."""
@@ -6364,6 +6891,24 @@ class SettingsDialog(QDialog):
         """Save settings and close dialog."""
         self.save_settings()
         self.parent_app.apply_settings(self.settings)
+        # Reconfigure Azure OCR singleton
+        try:
+            azure_endpoint = self.settings.get('azure_di_endpoint', '')
+            azure_key = self.settings.get('azure_di_key', '')
+            if azure_endpoint and azure_key:
+                from dmelogic.services.azure_ocr import configure_azure_ocr
+                configure_azure_ocr(azure_endpoint, azure_key)
+        except Exception:
+            pass
+        # Reconfigure OpenAI AI Parser singleton
+        try:
+            openai_key = self.settings.get('openai_api_key', '')
+            openai_model = self.settings.get('openai_model', 'gpt-4o-mini')
+            if openai_key:
+                from dmelogic.services.ai_rx_parser import configure_openai
+                configure_openai(openai_key, openai_model)
+        except Exception:
+            pass
         super().accept()
 
 
@@ -9048,6 +9593,7 @@ class SearchWorker(QThread):
     result_found = pyqtSignal(str, int, str, dict)  # filename, page_num, match_text, coordinates
     finished = pyqtSignal(list)  # all results
     error = pyqtSignal(str)
+    stale_files_pruned = pyqtSignal(int)  # number of stale entries removed from index
     
     def __init__(self, folder_path, search_query, search_options):
         super().__init__()
@@ -9077,7 +9623,8 @@ class SearchWorker(QThread):
             return
         
         # Initialize OCR indexer
-        indexer = OCRIndexer(r"C:\FaxManagerData\FaxManagerData\ocr_cache.db")
+        from dmelogic.paths import ocr_cache_db
+        indexer = OCRIndexer(str(ocr_cache_db()))
         
         # FAST PATH: If content search is OFF, only query the index (no PDF I/O)
         if search_meta and not search_content:
@@ -9092,8 +9639,9 @@ class SearchWorker(QThread):
                             matching_files.append(extra)
                             seen.add(extra.get('filepath'))
                 print(f"OCR Index found {len(matching_files)} matching files")
-                print(f"DEBUG: Sample match data: {matching_files[0] if matching_files else 'None'}")
                 
+                result_paths = set()
+                stale_paths = []
                 for file_data in matching_files:
                     if not self.isRunning():
                         break
@@ -9102,23 +9650,41 @@ class SearchWorker(QThread):
                     rel_path = file_data.get('rel_path', '')
                     filename = file_data.get('filename', '')
                     
-                    print(f"DEBUG: Processing - filename={filename}, rel_path={rel_path}, full_path={full_path}")
+                    # Skip files that no longer exist on disk
+                    if full_path and not os.path.exists(full_path):
+                        stale_paths.append(full_path)
+                        print(f"⚠️ Skipping stale index entry (file missing): {filename}")
+                        continue
                     
-                    # Add as metadata result
+                    result_paths.add(full_path)
+                    snippet = file_data.get('snippet', '') or ''
+                    match_text = snippet if snippet.strip() else f'Match in indexed content for: {filename}'
+                    
                     result = {
                         'filename': filename,
                         'full_path': full_path,
                         'rel_path': rel_path,
                         'page': 0,
-                        'match_type': 'Metadata (Cached)',
-                        'match_text': f'Match in indexed metadata for: {filename}',
+                        'match_type': 'PDF Content (OCR Cache)',
+                        'match_text': match_text,
                         'coordinates': None
                     }
                     self.results.append(result)
-                    print(f"DEBUG: Added result #{len(self.results)}: {result}")
                 
-                print(f"DEBUG: Total results before emit: {len(self.results)}")
-                self.progress.emit(100, "Metadata search complete")
+                # Also search by FILENAME across all PDF files on disk
+                self._add_filename_matches(result_paths)
+                
+                # Auto-prune stale entries from index
+                if stale_paths:
+                    try:
+                        for sp in stale_paths:
+                            indexer.remove_file(sp)
+                        self.stale_files_pruned.emit(len(stale_paths))
+                        print(f"🧹 Auto-pruned {len(stale_paths)} stale entries from OCR index")
+                    except Exception as e:
+                        print(f"Error pruning stale entries: {e}")
+                
+                self.progress.emit(100, "Search complete")
                 return  # Skip slow PDF content search
                 
             except Exception as e:
@@ -9159,15 +9725,8 @@ class SearchWorker(QThread):
                 self.error.emit(f"Error reading folder: {e}")
                 return
         
-        # Search in metadata first (if enabled)
-        if search_meta:
-            for filename in pdf_files:
-                if not self.isRunning():
-                    break
-                metadata_results = self.search_metadata(filename)
-                self.results.extend(metadata_results)
-        
         # Search in PDF content using cached OCR (instant!)
+        result_paths = set()
         if self.search_options['search_content']:
             try:
                 # Get matching files with metadata from OCR index
@@ -9178,8 +9737,9 @@ class SearchWorker(QThread):
                         if extra.get('filepath') not in seen:
                             matching_files.append(extra)
                             seen.add(extra.get('filepath'))
-                print(f"OCR Index found {len(matching_files)} matching files")  # Debug
+                print(f"OCR Index found {len(matching_files)} matching files")
                 
+                stale_paths_content = []
                 for file_data in matching_files:
                     if not self.isRunning():
                         break
@@ -9188,33 +9748,53 @@ class SearchWorker(QThread):
                     full_path = file_data['filepath']
                     rel_path = file_data['rel_path']
                     filename = file_data['filename']
+                    
+                    # Skip files that no longer exist on disk
+                    if full_path and not os.path.exists(full_path):
+                        stale_paths_content.append(full_path)
+                        print(f"⚠️ Skipping stale index entry (file missing): {filename}")
+                        continue
+                    
+                    result_paths.add(full_path)
                     snippet = file_data.get('snippet')
                     if snippet:
                         snippet = " ".join(snippet.split())
                     else:
                         cached_text = indexer.get_file_text(full_path)
                         snippet = self._build_snippet(cached_text)
+                    
+                    match_text = snippet if snippet else f'Match in indexed content for: {filename}'
 
-                    if snippet:
-                        self.results.append({
-                            'filename': filename,
-                            'full_path': full_path,
-                            'rel_path': rel_path,
-                            'page': 0,  # Page info not available in cache, use 0
-                            'match_type': 'PDF Content (OCR Cache)',
-                            'match_text': snippet,
-                            'coordinates': None
-                        })
-                        print(f"Found cached match in {rel_path}")
+                    self.results.append({
+                        'filename': filename,
+                        'full_path': full_path,
+                        'rel_path': rel_path,
+                        'page': 0,
+                        'match_type': 'PDF Content (OCR Cache)',
+                        'match_text': match_text,
+                        'coordinates': None
+                    })
+                    print(f"Found cached match in {rel_path}")
                 
-                # Update progress to 100% since OCR search is instant
-                self.progress.emit(100, "OCR search complete")
+                # Auto-prune stale entries from index
+                if stale_paths_content:
+                    try:
+                        for sp in stale_paths_content:
+                            indexer.remove_file(sp)
+                        self.stale_files_pruned.emit(len(stale_paths_content))
+                        print(f"🧹 Auto-pruned {len(stale_paths_content)} stale entries from OCR index")
+                    except Exception as e:
+                        print(f"Error pruning stale entries: {e}")
                 
             except Exception as e:
                 print(f"OCR indexer search failed: {e}")
                 # Fallback to old method if indexer fails
                 print("Falling back to real-time search...")
                 self._fallback_search()
+        
+        # Also search by FILENAME across all PDF files on disk
+        self._add_filename_matches(result_paths)
+        self.progress.emit(100, "Search complete")
 
     def _build_snippet(self, text: str, context: int = 60):
         """Return a short snippet around the first match."""
@@ -9229,6 +9809,39 @@ class SearchWorker(QThread):
             end = min(len(text), pos + len(self.search_query) + context)
             snippet = text[start:end]
         return " ".join(snippet.split()) if snippet else None
+    
+    def _add_filename_matches(self, already_matched: set):
+        """Search PDF files by filename and add matches not already in results."""
+        try:
+            query_lower = self.search_query.lower()
+            for root, dirs, files in os.walk(self.folder_path):
+                for f in files:
+                    if not f.lower().endswith('.pdf'):
+                        continue
+                    if query_lower not in f.lower():
+                        continue
+                    full_path = os.path.join(root, f)
+                    if full_path in already_matched:
+                        continue
+                    try:
+                        rel = os.path.relpath(full_path, self.folder_path)
+                    except Exception:
+                        rel = f
+                    self.results.append({
+                        'filename': f,
+                        'full_path': full_path,
+                        'rel_path': rel,
+                        'page': 0,
+                        'match_type': 'Filename',
+                        'match_text': f'Filename match: {f}',
+                        'coordinates': None
+                    })
+                    already_matched.add(full_path)
+            count = sum(1 for r in self.results if r.get('match_type') == 'Filename')
+            if count:
+                print(f"📄 Found {count} filename matches")
+        except Exception as e:
+            print(f"Filename search error: {e}")
     
     def _fallback_search(self):
         """Fallback to original real-time search method."""
@@ -9474,6 +10087,26 @@ class PDFViewer(QMainWindow):
         # --- Load Settings ---
         self.settings = self.load_settings()
         
+        # --- Configure Azure Document Intelligence OCR (if configured) ---
+        try:
+            azure_endpoint = self.settings.get('azure_di_endpoint', '')
+            azure_key = self.settings.get('azure_di_key', '')
+            if azure_endpoint and azure_key:
+                from dmelogic.services.azure_ocr import configure_azure_ocr
+                configure_azure_ocr(azure_endpoint, azure_key)
+        except Exception:
+            pass
+
+        # --- Configure OpenAI AI Rx Parser (if configured) ---
+        try:
+            openai_key = self.settings.get('openai_api_key', '')
+            openai_model = self.settings.get('openai_model', 'gpt-4o-mini')
+            if openai_key:
+                from dmelogic.services.ai_rx_parser import configure_openai
+                configure_openai(openai_key, openai_model)
+        except Exception:
+            pass
+        
         # --- Data Members ---
         self.current_file = None
         self.current_page_num = 0
@@ -9539,7 +10172,8 @@ class PDFViewer(QMainWindow):
         self.statusBar().addPermanentWidget(self._minimized_status_label)
         
         # --- OCR Indexer for instant search ---
-        self.ocr_indexer = OCRIndexer(r"C:\FaxManagerData\FaxManagerData\ocr_cache.db")
+        from dmelogic.paths import ocr_cache_db
+        self.ocr_indexer = OCRIndexer(str(ocr_cache_db()))
         
         # --- OCR Folder Watcher for incremental updates ---
         self.ocr_watcher_thread = None
@@ -9819,6 +10453,11 @@ class PDFViewer(QMainWindow):
             # Remove continuation arrow if present
             if "↳" in text:
                 text = text.split("↳", 1)[1].strip()
+            
+            # Strip refill chain collapse indicators (▶/▼)
+            for ch in ('▶', '▼', '►', '▾'):
+                text = text.replace(ch, '')
+            text = text.strip()
             
             if text.startswith("ORD-"):
                 text = text[4:]
@@ -10205,6 +10844,13 @@ class PDFViewer(QMainWindow):
         search_buttons_layout.addStretch()
         left_layout.addLayout(search_buttons_layout)
 
+        # Current browse folder indicator
+        self.browse_folder_label = QLabel("")
+        self.browse_folder_label.setStyleSheet("color: #6b7280; font-size: 10px; padding: 0 2px;")
+        self.browse_folder_label.setWordWrap(True)
+        self._update_browse_folder_label()
+        left_layout.addWidget(self.browse_folder_label)
+
         # Search progress bar
         self.search_progress = QProgressBar()
         self.search_progress.setVisible(False)
@@ -10293,35 +10939,42 @@ class PDFViewer(QMainWindow):
         quick_folder_layout.addStretch()
         folder_controls_layout.addLayout(quick_folder_layout)
         
-        # Current folder info and controls
-        folder_info_layout = QHBoxLayout()
-        self.folder_label = QLabel(f"Current: {os.path.basename(self.folder_path)}")
-        self.folder_label.setStyleSheet("font-weight: bold; color: #0078D4; font-size: 11px;")
-        
-        self.change_folder_btn = QPushButton("📁 Browse")
-        self.change_folder_btn.clicked.connect(self.change_folder)
-        
-        self.refresh_btn = QPushButton("🔄 Refresh")
-        self.refresh_btn.clicked.connect(self.load_file_list)
-        
-        folder_info_layout.addWidget(self.folder_label)
-        folder_info_layout.addStretch()
-        folder_info_layout.addWidget(self.refresh_btn)
-        folder_info_layout.addWidget(self.change_folder_btn)
-        folder_controls_layout.addLayout(folder_info_layout)
-        
-        # Quick folder management buttons
+        # Quick folder management + utility buttons
         quick_manage_layout = QHBoxLayout()
         self.save_folder_btn = QPushButton("💾 Save Current")
+        self.save_folder_btn.setToolTip("Save current folder to Quick Folders list")
         self.save_folder_btn.clicked.connect(self.save_current_folder)
         
         self.remove_folder_btn = QPushButton("🗑 Remove")
+        self.remove_folder_btn.setToolTip("Remove selected folder from Quick Folders list")
         self.remove_folder_btn.clicked.connect(self.remove_selected_folder)
         
         quick_manage_layout.addWidget(self.save_folder_btn)
         quick_manage_layout.addWidget(self.remove_folder_btn)
         quick_manage_layout.addStretch()
         folder_controls_layout.addLayout(quick_manage_layout)
+        
+        # Utility row: Open in Explorer, Sort toggle
+        utility_layout = QHBoxLayout()
+        
+        self.open_explorer_btn = QPushButton("📂 Open in Explorer")
+        self.open_explorer_btn.setToolTip("Open current folder in Windows Explorer")
+        self.open_explorer_btn.clicked.connect(self.open_folder_in_explorer)
+        
+        self.sort_toggle_btn = QPushButton("Sort: Date ↓")
+        self.sort_toggle_btn.setToolTip("Toggle file sort between Date (newest first) and Name (A-Z)")
+        self.sort_toggle_btn.clicked.connect(self.toggle_file_sort)
+        self._file_sort_mode = 'date'  # 'date' or 'name'
+        
+        self.refresh_btn = QPushButton("🔄 Refresh")
+        self.refresh_btn.setToolTip("Reload file list from disk")
+        self.refresh_btn.clicked.connect(self.load_file_list)
+        
+        utility_layout.addWidget(self.open_explorer_btn)
+        utility_layout.addWidget(self.sort_toggle_btn)
+        utility_layout.addWidget(self.refresh_btn)
+        utility_layout.addStretch()
+        folder_controls_layout.addLayout(utility_layout)
         
         left_layout.addLayout(folder_controls_layout)
         
@@ -10358,6 +11011,21 @@ class PDFViewer(QMainWindow):
         self.setup_persistent_highlighting()
         
         files_layout.addWidget(self.file_list_widget, 1)
+
+        # Link indicator legend
+        legend_layout = QHBoxLayout()
+        legend_layout.setContentsMargins(4, 0, 4, 0)
+        legend_layout.setSpacing(8)
+        for color, label_text in [('#2196F3', 'Order'), ('#9C27B0', 'Patient')]:
+            dot = QLabel()
+            dot.setFixedSize(10, 10)
+            dot.setStyleSheet(f"background-color: {color}; border-radius: 5px; border: none;")
+            lbl = QLabel(label_text)
+            lbl.setStyleSheet("color: #9AA0A6; font-size: 9px; border: none; padding: 0;")
+            legend_layout.addWidget(dot)
+            legend_layout.addWidget(lbl)
+        legend_layout.addStretch()
+        files_layout.addLayout(legend_layout)
 
         # File list status
         self.left_status_label = QLabel("Ready • 0 files indexed")
@@ -10479,86 +11147,11 @@ class PDFViewer(QMainWindow):
         center_layout.addWidget(self.scroll_area)
         content_splitter.addWidget(center_pane)
 
-        # --- RIGHT PANE: PATIENT INFORMATION & NOTES ---
-        right_pane = QWidget()
-        right_pane.setObjectName("DocInfoPane")
-        info_layout = QVBoxLayout(right_pane)
-        info_layout.setContentsMargins(12, 12, 12, 12)
-        info_layout.setSpacing(8)
-
-        # Patient Information Section
-        patient_info_label = QLabel("Patient Information")
-        patient_info_label.setStyleSheet("font-weight: 600; font-size: 11pt; margin-bottom: 4px;")
-        info_layout.addWidget(patient_info_label)
-
-        # First Name
-        first_name_label = QLabel("First Name:")
-        first_name_label.setStyleSheet("font-size: 10pt; font-weight: bold; margin-top: 5px;")
-        info_layout.addWidget(first_name_label)
-        
-        self.first_name_input = QLineEdit()
-        self.first_name_input.textChanged.connect(lambda text: self.first_name_input.setText(text.upper()) if text != text.upper() else None)
-        info_layout.addWidget(self.first_name_input)
-        
-        # Last Name
-        last_name_label = QLabel("Last Name:")
-        last_name_label.setStyleSheet("font-size: 10pt; font-weight: bold; margin-top: 5px;")
-        info_layout.addWidget(last_name_label)
-        
-        self.last_name_input = QLineEdit()
-        self.last_name_input.textChanged.connect(lambda text: self.last_name_input.setText(text.upper()) if text != text.upper() else None)
-        info_layout.addWidget(self.last_name_input)
-        
-        # Date of Birth
-        dob_label = QLabel("Date of Birth:")
-        dob_label.setStyleSheet("font-size: 10pt; font-weight: bold; margin-top: 5px;")
-        info_layout.addWidget(dob_label)
-        
-        self.dob_input = QLineEdit()
-        self.dob_input.setPlaceholderText("MM/DD/YYYY")
-        info_layout.addWidget(self.dob_input)
-        
-        # Phone
-        phone_label = QLabel("Phone:")
-        phone_label.setStyleSheet("font-size: 10pt; font-weight: bold; margin-top: 5px;")
-        info_layout.addWidget(phone_label)
-        
-        self.phone_input = QLineEdit()
-        self.phone_input.setPlaceholderText("(XXX) XXX-XXXX")
-        info_layout.addWidget(self.phone_input)
-        
-        # Note History
-        notes_label = QLabel("Note History:")
-        notes_label.setStyleSheet("font-size: 10pt; font-weight: bold; margin-top: 8px;")
-        info_layout.addWidget(notes_label)
-        
-        self.notes_history = QTextEdit()
-        self.notes_history.setReadOnly(True)
-        info_layout.addWidget(self.notes_history)
-        
-        # New Note Input
-        self.new_note_input = QLineEdit()
-        self.new_note_input.setPlaceholderText("Type a new note here...")
-        info_layout.addWidget(self.new_note_input)
-        
-        self.add_note_button = QPushButton("Add Note")
-        self.add_note_button.clicked.connect(self.add_note)
-        info_layout.addWidget(self.add_note_button)
-        
-        # OCR Auto-Fill button
-        self.ocr_extract_button = QPushButton("🤖 Extract Data from PDF")
-        self.ocr_extract_button.setToolTip("Intelligently extract patient info, prescriber, diagnosis, and items from the current PDF")
-        self.ocr_extract_button.clicked.connect(self.extract_and_populate_from_ocr)
-        info_layout.addWidget(self.ocr_extract_button)
-        
-        content_splitter.addWidget(right_pane)
-
-        # Set initial sizes for the four panes (CONTROLS: 280, FILES: 300, VIEWER: 500, PATIENT: 220)
-        content_splitter.setSizes([280, 300, 500, 220])
+        # Set initial sizes for the three panes (CONTROLS: 280, FILES: 300, VIEWER: 720)
+        content_splitter.setSizes([280, 300, 720])
         content_splitter.setStretchFactor(0, 0)  # controls pane stays compact
         content_splitter.setStretchFactor(1, 1)  # files pane grows
-        content_splitter.setStretchFactor(2, 2)  # viewer pane grows most
-        content_splitter.setStretchFactor(3, 0)  # patient info stays fixed
+        content_splitter.setStretchFactor(2, 3)  # viewer pane grows most
         self.layout.addWidget(content_splitter)
 
         # Add document viewer tab to main tabs
@@ -11404,9 +11997,8 @@ class PDFViewer(QMainWindow):
             if folder_path and os.path.isdir(folder_path):
                 if getattr(self, "folder_path", None) != folder_path:
                     self.folder_path = folder_path
-                    if hasattr(self, "folder_label"):
-                        folder_name = os.path.basename(folder_path.rstrip("/\\")) or folder_path
-                        self.folder_label.setText(f"Current: {folder_name}")
+                    if hasattr(self, 'browse_folder_label'):
+                        self._update_browse_folder_label()
                     if hasattr(self, "load_file_list"):
                         self.load_file_list()
 
@@ -11415,7 +12007,7 @@ class PDFViewer(QMainWindow):
                 if hasattr(self, "file_list_widget") and self.file_list_widget:
                     for row in range(self.file_list_widget.count()):
                         item = self.file_list_widget.item(row)
-                        if item and item.text().strip() == filename:
+                        if item and (self._get_file_item_name(item) or item.text()).strip() == filename:
                             self.file_list_widget.setCurrentRow(row)
                             self.file_list_widget.scrollToItem(
                                 item, QAbstractItemView.ScrollHint.PositionAtCenter
@@ -12276,8 +12868,11 @@ class PDFViewer(QMainWindow):
             view_doc_btn.clicked.connect(lambda: self._view_patient_document(docs_list))
             upload_doc_btn = QPushButton("📤 Upload Document")
             upload_doc_btn.clicked.connect(lambda: self.upload_patient_document(patient_id, last_name, first_name))
+            scan_doc_btn = QPushButton("🖨️ Scan Document")
+            scan_doc_btn.clicked.connect(lambda: self._scan_patient_document_dialog(patient_id, last_name, first_name, docs_list))
             doc_buttons.addWidget(view_doc_btn)
             doc_buttons.addWidget(upload_doc_btn)
+            doc_buttons.addWidget(scan_doc_btn)
             doc_buttons.addStretch()
             docs_layout.addLayout(doc_buttons)
             
@@ -12685,6 +13280,47 @@ class PDFViewer(QMainWindow):
             
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Failed to upload document: {e}")
+
+    def _scan_patient_document_dialog(self, patient_id, last_name, first_name, docs_list):
+        """Scan a document from the scanner and attach to a patient (from Patient Details dialog)."""
+        try:
+            patient_name = f"{last_name}, {first_name}".strip(", ")
+            suggested = f"{patient_name} Document".strip() if patient_name else ""
+
+            from dmelogic.scan import scan_document
+            filename = scan_document(
+                parent_widget=self,
+                suggested_name=suggested,
+            )
+            if not filename:
+                return  # User cancelled or error
+
+            # Save into patient_documents DB record
+            from dmelogic.paths import resolve_document_path
+            resolved = resolve_document_path(filename)
+
+            try:
+                self.ensure_patient_documents_table()
+            except Exception:
+                pass
+
+            conn = sqlite3.connect(self.patient_database_file)
+            cur = conn.cursor()
+            cur.execute(
+                "INSERT INTO patient_documents (patient_id, description, original_name, stored_path) VALUES (?, ?, ?, ?)",
+                (int(patient_id), "Scanned document", filename, str(resolved)),
+            )
+            conn.commit()
+            conn.close()
+
+            # Refresh the docs_list widget
+            item = QListWidgetItem(filename)
+            item.setData(Qt.ItemDataRole.UserRole, str(resolved))
+            docs_list.addItem(item)
+
+            QMessageBox.information(self, "Scan Complete", f"Scanned and saved:\n{filename}")
+        except Exception as e:
+            QMessageBox.critical(self, "Scan Error", f"Failed to scan document: {e}")
     
     def _open_sms_dialog(self, patient_id, phone, patient_name, username):
         """Open SMS dialog for a patient."""
@@ -14046,6 +14682,11 @@ class PDFViewer(QMainWindow):
         del_doc_btn.setToolTip("Remove from patient profile AND permanently delete file from disk")
         docs_btns.addWidget(add_doc_btn)
         docs_btns.addWidget(open_doc_btn)
+        scan_doc_btn = QPushButton("🖨️ Scan")
+        scan_doc_btn.setStyleSheet("QPushButton { background-color: #17a2b8; color: white; font-weight: bold; padding: 8px 15px; border-radius: 5px; }")
+        scan_doc_btn.setToolTip("Scan a document from the scanner and attach to this patient")
+        scan_doc_btn.clicked.connect(self.scan_patient_document)
+        docs_btns.addWidget(scan_doc_btn)
         docs_btns.addWidget(unlink_doc_btn)
         docs_btns.addWidget(del_doc_btn)
         docs_btns.addStretch()
@@ -14242,6 +14883,66 @@ class PDFViewer(QMainWindow):
             self.load_patient_documents(int(patient_id))
         except Exception as e:
             QMessageBox.critical(self, 'Linked Documents', f'Failed to add document: {e}')
+
+    def scan_patient_document(self):
+        """Scan a document from the scanner and attach to the current patient."""
+        try:
+            # Defensive: ensure table exists
+            try:
+                self.ensure_patient_documents_table()
+            except Exception:
+                pass
+            patient_id = getattr(self, '_current_patient_id', None)
+            if not patient_id:
+                QMessageBox.information(self, 'Scan Document', 'Please select a patient first.')
+                return
+
+            # Build suggested filename from patient name
+            patient_name = ""
+            try:
+                last = getattr(self, 'patient_last_name_edit', None)
+                first = getattr(self, 'patient_first_name_edit', None)
+                if last and first:
+                    patient_name = f"{last.text().strip()}, {first.text().strip()}".strip(", ")
+            except Exception:
+                pass
+
+            suggested = f"{patient_name} Document".strip() if patient_name else ""
+
+            # Ask for description
+            desc, ok = QInputDialog.getText(self, 'Document Description', 'Enter a description for this scan:')
+            if not ok:
+                return
+            desc = (desc or '').strip()
+
+            # Scan using WIA
+            from dmelogic.scan import scan_document
+            filename = scan_document(
+                parent_widget=self,
+                suggested_name=suggested,
+            )
+            if not filename:
+                return  # User cancelled or error
+
+            # Resolve full path for the patient_documents record
+            from dmelogic.paths import resolve_document_path
+            resolved = resolve_document_path(filename)
+
+            # Insert record into patient_documents
+            conn = sqlite3.connect(self.patient_database_file)
+            cur = conn.cursor()
+            cur.execute(
+                "INSERT INTO patient_documents (patient_id, description, original_name, stored_path) VALUES (?, ?, ?, ?)",
+                (int(patient_id), desc or "Scanned document", filename, str(resolved)),
+            )
+            conn.commit()
+            conn.close()
+
+            # Refresh
+            self.load_patient_documents(int(patient_id))
+            QMessageBox.information(self, 'Scan Complete', f'Scanned and saved:\n{filename}')
+        except Exception as e:
+            QMessageBox.critical(self, 'Scan Document', f'Failed to scan document: {e}')
 
     def open_selected_patient_document(self):
         try:
@@ -14708,6 +15409,15 @@ class PDFViewer(QMainWindow):
             self._orders_yesno_delegate = YesNoDelegate(self.orders_table)
             self.orders_table.setItemDelegateForColumn(14, self._orders_yesno_delegate)
         except Exception:
+            pass
+
+        # Use color-preserving delegate for Refill Due Date column (index 9)
+        # so programmatic setForeground() isn't overridden by QSS
+        try:
+            self._refill_due_delegate = ColorPreservingDelegate(self.orders_table)
+            self.orders_table.setItemDelegateForColumn(9, self._refill_due_delegate)
+        except Exception:
+            pass
             pass
         
         # Build the new tab layout with filter bar and action panel
@@ -15613,6 +16323,11 @@ class PDFViewer(QMainWindow):
             
             # Add orders to table - ONE ROW PER ITEM
             self._orders_updating = True
+            
+            # Refill chain tracking
+            self._base_to_orders = {}   # base_order_id → [(refill_no, order_id), ...]
+            self._order_to_base = {}    # order_id → base_order_id
+            
             for order in orders:
                 order_id = order["id"]
                 rx_date = order["rx_date"]
@@ -15645,6 +16360,18 @@ class PDFViewer(QMainWindow):
                     refill_no_int = 0
                 max_refill_in_chain = int(max_refill_by_base.get(base_order_id, 0) or 0)
                 refilled_for_display = refill_no_int < max_refill_in_chain
+                
+                # Track refill chain membership for collapse/expand
+                self._order_to_base[order_id] = base_order_id
+                if base_order_id not in self._base_to_orders:
+                    self._base_to_orders[base_order_id] = []
+                if not any(oid == order_id for _, oid in self._base_to_orders[base_order_id]):
+                    self._base_to_orders[base_order_id].append((refill_no_int, order_id))
+                
+                # Skip older refills — only show the latest refill order per chain
+                if refilled_for_display:
+                    continue
+                
                 try:
                     patient_phone = order["patient_phone"] or ""
                 except (KeyError, IndexError):
@@ -15774,6 +16501,8 @@ class PDFViewer(QMainWindow):
                     # Store order_id and item index in UserRole for grouping
                     # This keeps items together when filtering/sorting
                     order_item.setData(Qt.ItemDataRole.UserRole, (order_id, idx))
+                    # Also store base_order_id for chain lookups
+                    order_item.setData(Qt.ItemDataRole.UserRole + 1, base_order_id)
                     patient_item.setData(Qt.ItemDataRole.UserRole, (order_id, idx))
                     patient_item.setData(Qt.ItemDataRole.UserRole + 1, patient_phone or "")
                     patient_item.setData(Qt.ItemDataRole.UserRole + 2, patient_phone_digits)
@@ -15798,8 +16527,8 @@ class PDFViewer(QMainWindow):
                     if item_hcpcs:
                         parts = item_hcpcs.split("-", 1)
                         hcpcs_clean = parts[0].strip()
-                    _hcpcs_item = QTableWidgetItem(hcpcs_clean if (hcpcs_clean and idx == 0) else "")
-                    if hcpcs_clean and idx == 0:
+                    _hcpcs_item = QTableWidgetItem(hcpcs_clean or "")
+                    if hcpcs_clean:
                         _hcpcs_fg, _hcpcs_bg = {
                             'A': (QColor('#14b8a6'), QColor(20,  184, 166, 40)),
                             'T': (QColor('#a855f7'), QColor(168,  85, 247, 40)),
@@ -15846,8 +16575,7 @@ class PDFViewer(QMainWindow):
 
                     if refills_int <= 0:
                         due_item.setText("✗")
-                        due_item.setBackground(QColor(220, 53, 69, 180))  # Red background
-                        due_item.setForeground(QColor(255, 255, 255))  # White text
+                        due_item.setForeground(QColor(220, 53, 69))  # Red text
                         font = due_item.font()
                         font.setBold(True)
                         due_item.setFont(font)
@@ -15871,9 +16599,8 @@ class PDFViewer(QMainWindow):
                                     except Exception:
                                         due_item.setText(due_str_iso)
 
-                                    # Apply row tint and emphasis
+                                    # Traffic light FONT COLOR (no background)
                                     try:
-                                        from datetime import timedelta as _td
                                         today = datetime.now().date()
                                         due_date = due_dt.date()
                                     except Exception:
@@ -15882,21 +16609,19 @@ class PDFViewer(QMainWindow):
                                     if due_date is not None:
                                         days_until_due = (due_date - today).days
 
+                                        font = due_item.font()
+                                        font.setBold(True)
+                                        due_item.setFont(font)
+
                                         if days_until_due <= 0:
-                                            # Due or overdue: GREEN (due date cell only)
-                                            due_item.setBackground(QColor(40, 167, 69, 120))
-                                            font = due_item.font()
-                                            font.setBold(True)
-                                            due_item.setFont(font)
-                                        elif days_until_due <= 5:
-                                            # Within 5 days: YELLOW (due date cell only)
-                                            due_item.setBackground(QColor(255, 193, 7, 120))
-                                            font = due_item.font()
-                                            font.setBold(True)
-                                            due_item.setFont(font)
+                                            # Due or overdue → GREEN
+                                            due_item.setForeground(QColor(5, 150, 105))
+                                        elif days_until_due <= 7:
+                                            # Within 7 days → YELLOW/AMBER
+                                            due_item.setForeground(QColor(217, 119, 6))
                                         else:
-                                            # Not due yet: RED (due date cell only)
-                                            due_item.setBackground(QColor(220, 53, 69, 60))
+                                            # Not due yet → RED
+                                            due_item.setForeground(QColor(220, 53, 69))
                         except Exception:
                             pass
 
@@ -15904,7 +16629,6 @@ class PDFViewer(QMainWindow):
                     # This ensures the newest refill order (e.g., ORD-014-R1) shows its due date.
                     if refilled_for_display:
                         due_item.setText("REFILLED")
-                        due_item.setBackground(QColor(60, 60, 60))  # Dark gray/black
                         due_item.setForeground(QColor(128, 128, 128))  # Gray text
                         font = due_item.font()
                         font.setItalic(True)
@@ -16002,6 +16726,28 @@ class PDFViewer(QMainWindow):
             header.resizeSection(2, 110)  # DOB column
             header.resizeSection(3, 180)  # HCPCS column
             self.orders_table.resizeColumnsToContents()
+            
+            # Post-loop: add ▶ indicators to latest refills with prior fills
+            # (chains are now fully built so we can check accurately)
+            for r in range(self.orders_table.rowCount()):
+                oi = self.orders_table.item(r, 0)
+                if not oi:
+                    continue
+                ud = oi.data(Qt.ItemDataRole.UserRole)
+                if not ud or ud[1] != 0:
+                    continue  # Only first item row of each order
+                oid = ud[0]
+                base = self._order_to_base.get(oid)
+                if base is None:
+                    continue
+                chain = self._base_to_orders.get(base, [])
+                if len(chain) > 1:
+                    chain_sorted = sorted(chain, key=lambda x: x[0])
+                    if chain_sorted[-1][1] == oid:  # This is the latest refill
+                        prior_count = len(chain) - 1
+                        oi.setText(f"▶ {oi.text()}")
+                        oi.setToolTip(f"Click to view {prior_count} prior fill(s)")
+            
             print(f"✅ Loaded {len(orders)} orders (expanded to item rows)")
             self._orders_updating = False
             
@@ -16036,6 +16782,11 @@ class PDFViewer(QMainWindow):
             item = self.orders_table.item(first_row, column)
             if item:
                 text = item.text()
+                # Strip refill chain indicators for clean sorting
+                if column == 0:
+                    for ch in ('▶', '▼'):
+                        text = text.replace(ch, '')
+                    text = text.strip()
                 # Try to parse as number for numeric columns
                 try:
                     if column in [5, 6, 7]:  # Qty, Refills, Days
@@ -16172,9 +16923,14 @@ class PDFViewer(QMainWindow):
                     continue
                 item_idx = 0
             
-            # Only check first item row (idx=0) for order-level matching
-            # (Patient name, order date, status are only populated on first row)
+            # For child rows (idx!=0), only check HCPCS and Description
             if item_idx != 0:
+                if search_text:
+                    for ccol in [3, 4]:  # HCPCS, Description
+                        citem = self.orders_table.item(row, ccol)
+                        if citem and search_text in citem.text().lower():
+                            matching_order_ids.add(order_id)
+                            break
                 continue
             
             patient_item = self.orders_table.item(row, 1)  # Column 1 is Patient
@@ -16183,11 +16939,11 @@ class PDFViewer(QMainWindow):
             
             matches_search = True
             
-            # Universal search across order#, patient, HCPCS, status
+            # Universal search across order#, patient, HCPCS, description, status
             if search_text:
-                # Check order#, HCPCS, status first (exact substring match)
+                # Check order#, HCPCS, description, status first (exact substring match)
                 row_text = ""
-                for col in [0, 2, 12]:  # Order #, HCPCS, Status
+                for col in [0, 3, 4, 11]:  # Order #, HCPCS, Description, Status
                     item = self.orders_table.item(row, col)
                     if item:
                         row_text += item.text().lower() + " "
@@ -16597,7 +17353,10 @@ class PDFViewer(QMainWindow):
         inventory_btn = make_primary_button("Inventory Report")
         billing_btn = make_primary_button("Billing Report")
         profit_btn = make_primary_button("Profit Report")
-        
+        ar_aging_btn = make_primary_button("AR Aging")
+        refills_btn = make_primary_button("Refills Due")
+        analytics_btn = make_primary_button("Order Analytics")
+
         # Auto-reconciliation import button (highlighted differently)
         import_payments_btn = QPushButton("📥 Import Payments")
         import_payments_btn.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -16615,18 +17374,31 @@ class PDFViewer(QMainWindow):
             }
         """)
 
-        patient_btn.clicked.connect(self.generate_patient_report)
-        order_btn.clicked.connect(self.generate_order_report)
-        recon_btn.clicked.connect(self.generate_reconciliation_report)
-        delivery_btn.clicked.connect(self.generate_delivery_report)
-        invoice_btn.clicked.connect(self.generate_invoice_report)
-        inventory_btn.clicked.connect(self.open_inventory_reports_dialog)
-        billing_btn.clicked.connect(self.generate_billing_report)
-        profit_btn.clicked.connect(self.generate_profit_report_per_order)
+        self._last_report_fn = None   # tracks which report to re-generate
+
+        def _bind_report(btn, fn):
+            """Connect button and remember last-clicked report for Generate."""
+            def _handler():
+                self._last_report_fn = fn
+                fn()
+            btn.clicked.connect(_handler)
+
+        _bind_report(patient_btn, self.generate_patient_report)
+        _bind_report(order_btn, self.generate_order_report)
+        _bind_report(recon_btn, self.generate_reconciliation_report)
+        _bind_report(delivery_btn, self.generate_delivery_report)
+        _bind_report(invoice_btn, self.generate_invoice_report)
+        _bind_report(inventory_btn, self.open_inventory_reports_dialog)
+        _bind_report(billing_btn, self.generate_billing_report)
+        _bind_report(profit_btn, self.generate_profit_report_per_order)
+        _bind_report(ar_aging_btn, self.open_ar_report)
+        _bind_report(refills_btn, self.open_refills_due_report)
+        _bind_report(analytics_btn, self.open_order_analytics)
         import_payments_btn.clicked.connect(self.import_payment_reconciliation)
 
         for btn in (patient_btn, order_btn, recon_btn, delivery_btn,
-                invoice_btn, inventory_btn, billing_btn, profit_btn, import_payments_btn):
+                invoice_btn, inventory_btn, billing_btn, profit_btn,
+                ar_aging_btn, refills_btn, analytics_btn, import_payments_btn):
             toolbar_row.addWidget(btn)
 
         toolbar_row.addItem(QSpacerItem(20, 10, QSizePolicy.Policy.Expanding,
@@ -16653,6 +17425,25 @@ class PDFViewer(QMainWindow):
         toolbar_row.addWidget(self.report_start_date)
         toolbar_row.addWidget(date_label_to)
         toolbar_row.addWidget(self.report_end_date)
+
+        # Generate button
+        generate_report_btn = QPushButton("Generate Report")
+        generate_report_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        generate_report_btn.setMinimumWidth(120)
+        generate_report_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #27ae60;
+                color: white;
+                border-radius: 4px;
+                padding: 4px 12px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background-color: #219a52;
+            }
+        """)
+        generate_report_btn.clicked.connect(self._generate_last_report)
+        toolbar_row.addWidget(generate_report_btn)
 
         main_layout.addLayout(toolbar_row)
 
@@ -18077,7 +18868,8 @@ class PDFViewer(QMainWindow):
         self.settings['last_folder'] = self.folder_path
         self.save_settings()
         
-        self.folder_label.setText(f"Current: {os.path.basename(self.folder_path)}")
+        if hasattr(self, 'browse_folder_label'):
+            self._update_browse_folder_label()
         self.setWindowTitle(f"Document Manager v1.0 - {os.path.basename(self.folder_path)}")
         
         self.reset_viewer_and_fields()
@@ -18089,7 +18881,6 @@ class PDFViewer(QMainWindow):
     def scroll_wheel_event(self, event):
         """Handle mouse wheel scrolling with Ctrl+wheel for zooming."""
         modifiers = QApplication.keyboardModifiers()
-        
         if modifiers == Qt.KeyboardModifier.ControlModifier:
             if event.angleDelta().y() > 0:
                 self.zoom_in()
@@ -18097,6 +18888,27 @@ class PDFViewer(QMainWindow):
                 self.zoom_out()
         else:
             QScrollArea.wheelEvent(self.scroll_area, event)
+
+    def open_folder_in_explorer(self):
+        """Open the current folder in Windows File Explorer."""
+        if hasattr(self, 'folder_path') and self.folder_path and os.path.isdir(self.folder_path):
+            os.startfile(self.folder_path)
+        else:
+            QMessageBox.warning(self, "No Folder", "No folder is currently selected.")
+
+    def toggle_file_sort(self):
+        """Toggle file list sort between date (newest first) and name (A-Z)."""
+        if not hasattr(self, '_file_sort_mode'):
+            self._file_sort_mode = 'date'
+        
+        if self._file_sort_mode == 'date':
+            self._file_sort_mode = 'name'
+            self.sort_toggle_btn.setText('Sort: Name A-Z')
+        else:
+            self._file_sort_mode = 'date'
+            self.sort_toggle_btn.setText('Sort: Date \u2193')
+        
+        self.load_file_list()
 
     def apply_dark_theme(self):
         """Apply dark theme to the application.
@@ -18234,9 +19046,10 @@ class PDFViewer(QMainWindow):
         try:
             from threading import Event, Thread
             from ocr_indexer import watch_folder
+            from dmelogic.paths import ocr_folder as _ocr_folder, ocr_cache_db
 
-            # Prefer the network/main folder if present, else fall back to the local 'faxes' folder
-            main_folder = r"C:\FaxManagerData\FaxManagerData\Faxes OCR'd"
+            # Use configured OCR folder, fall back to local 'faxes' folder
+            main_folder = str(_ocr_folder())
             local_folder = "faxes"
 
             if os.path.exists(main_folder):
@@ -18251,7 +19064,7 @@ class PDFViewer(QMainWindow):
             self.ocr_stop_event = Event()
             self.ocr_watcher_thread = Thread(
                 target=watch_folder,
-                args=(watch_path, r"C:\FaxManagerData\FaxManagerData\ocr_cache.db", self.ocr_stop_event),
+                args=(watch_path, str(ocr_cache_db()), self.ocr_stop_event),
                 daemon=True,
             )
             self.ocr_watcher_thread.start()
@@ -18274,26 +19087,345 @@ class PDFViewer(QMainWindow):
         except Exception as e:
             print(f"⚠️ Error while stopping OCR folder watcher: {e}")
     
+    def _get_file_item_name(self, item):
+        """Extract the real filename from a file list item (stored in UserRole)."""
+        if item is None:
+            return None
+        name = item.data(Qt.ItemDataRole.UserRole)
+        if name:
+            return name
+        return item.text()
+
+    def _build_file_link_cache(self):
+        """Query orders.db and patients.db to determine which files are linked.
+        
+        Returns dict mapping lowercase basename → set of link types:
+          'O' = linked to an order (as attached RX or signed ticket)
+          'P' = linked to a patient (in patient_documents table)
+        """
+        cache = {}  # lowercase basename → set('O', 'P')
+        # --- Orders ---
+        try:
+            db = getattr(self, 'orders_database_file', None) or getattr(self, 'orders_db_path', None)
+            if db and os.path.exists(db):
+                conn = sqlite3.connect(db)
+                cur = conn.cursor()
+                for col in ('attached_rx_files', 'attached_signed_ticket_files'):
+                    try:
+                        cur.execute(f"SELECT {col} FROM orders WHERE {col} IS NOT NULL AND {col} != ''")
+                        for (val,) in cur.fetchall():
+                            if val:
+                                # Handle both \n and ; separators
+                                for line in str(val).replace(';', '\n').splitlines():
+                                    line = line.strip()
+                                    if line:
+                                        base = os.path.basename(line).lower()
+                                        cache.setdefault(base, set()).add('O')
+                    except Exception:
+                        pass
+                conn.close()
+        except Exception as e:
+            print(f"_build_file_link_cache orders error: {e}")
+        # --- Patient documents ---
+        try:
+            db = getattr(self, 'patient_database_file', None) or getattr(self, 'patient_db_path', None)
+            if db and os.path.exists(db):
+                conn = sqlite3.connect(db)
+                cur = conn.cursor()
+                try:
+                    cur.execute("SELECT original_name FROM patient_documents WHERE original_name IS NOT NULL")
+                    for (orig,) in cur.fetchall():
+                        if orig:
+                            base = os.path.basename(orig.strip()).lower()
+                            cache.setdefault(base, set()).add('P')
+                except Exception:
+                    pass
+                # Also check stored_path basenames
+                try:
+                    cur.execute("SELECT stored_path FROM patient_documents WHERE stored_path IS NOT NULL")
+                    for (sp,) in cur.fetchall():
+                        if sp:
+                            base = os.path.basename(sp.strip()).lower()
+                            cache.setdefault(base, set()).add('P')
+                except Exception:
+                    pass
+                conn.close()
+        except Exception as e:
+            print(f"_build_file_link_cache patients error: {e}")
+        return cache
+
+    def _file_link_icon(self, filename, link_cache):
+        """Return a QIcon indicating link status for a file."""
+        links = link_cache.get(filename.lower(), set())
+        has_order = 'O' in links
+        has_patient = 'P' in links
+        if not has_order and not has_patient:
+            return None
+        # Create a small colored dot icon (16x16)
+        pixmap = QPixmap(16, 16)
+        pixmap.fill(QColor(0, 0, 0, 0))  # Transparent background
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        if has_order and has_patient:
+            # Both: split dot - left blue, right purple
+            painter.setBrush(QBrush(QColor('#2196F3')))  # Blue for order
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.drawChord(2, 2, 12, 12, 90 * 16, 180 * 16)  # Left half
+            painter.setBrush(QBrush(QColor('#9C27B0')))  # Purple for patient
+            painter.drawChord(2, 2, 12, 12, 270 * 16, 180 * 16)  # Right half
+        elif has_order:
+            painter.setBrush(QBrush(QColor('#2196F3')))  # Blue dot for order
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.drawEllipse(2, 2, 12, 12)
+        elif has_patient:
+            painter.setBrush(QBrush(QColor('#9C27B0')))  # Purple dot for patient
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.drawEllipse(2, 2, 12, 12)
+        painter.end()
+        return QIcon(pixmap)
+
     def show_file_context_menu(self, position):
-        """Show context menu for file operations: rename and move to subfolder."""
+        """Show context menu for file operations: rename, move, delete, and link."""
         item = self.file_list_widget.itemAt(position)
         if not item:
             return
+        
+        filename = self._get_file_item_name(item)
         
         menu = QMenu(self)
         
         rename_action = menu.addAction("✏️ Rename File")
         move_action = menu.addAction("📁 Move to Subfolder")
         delete_action = menu.addAction("🗑 Delete File")
+        menu.addSeparator()
+        link_order_action = menu.addAction("📋 Link to Order (RX)")
+        link_delivery_action = menu.addAction("📦 Link to Order (Delivery Confirmation)")
+        link_patient_action = menu.addAction("👤 Link to Patient")
         
         action = menu.exec(self.file_list_widget.mapToGlobal(position))
         
         if action == rename_action:
-            self.rename_file(item.text())
+            self.rename_file(filename)
         elif action == move_action:
-            self.move_file_to_subfolder(item.text())
+            self.move_file_to_subfolder(filename)
         elif action == delete_action:
-            self.delete_file(item.text())
+            self.delete_file(filename)
+        elif action == link_order_action:
+            self._link_file_to_order(filename, doc_type='rx')
+        elif action == link_delivery_action:
+            self._link_file_to_order(filename, doc_type='delivery')
+        elif action == link_patient_action:
+            self._link_file_to_patient(filename)
+
+    def _link_file_to_order(self, filename, doc_type='rx'):
+        """Link a file to an existing order as an attached RX or delivery confirmation."""
+        try:
+            file_path = os.path.join(self.folder_path, filename)
+            if not os.path.exists(file_path):
+                QMessageBox.warning(self, "File Not Found", f"File '{filename}' not found.")
+                return
+
+            db = getattr(self, 'orders_database_file', None) or getattr(self, 'orders_db_path', None)
+            if not db or not os.path.exists(db):
+                QMessageBox.warning(self, "Database Error", "Orders database not found.")
+                return
+
+            type_label = "Delivery Confirmation" if doc_type == 'delivery' else "RX"
+
+            # Prompt for order number or patient name search
+            search_text, ok = QInputDialog.getText(
+                self, f"Link {type_label} to Order",
+                "Enter Order # or patient last name to search:"
+            )
+            if not ok or not search_text.strip():
+                return
+
+            search_text = search_text.strip()
+
+            conn = sqlite3.connect(db)
+            cur = conn.cursor()
+            try:
+                # Search by order ID or patient last name
+                if search_text.isdigit():
+                    cur.execute(
+                        "SELECT id, patient_last_name, patient_first_name, order_date, status "
+                        "FROM orders WHERE id = ? OR CAST(id AS TEXT) LIKE ?",
+                        (int(search_text), f"%{search_text}%")
+                    )
+                else:
+                    cur.execute(
+                        "SELECT id, patient_last_name, patient_first_name, order_date, status "
+                        "FROM orders WHERE patient_last_name LIKE ? OR patient_first_name LIKE ? "
+                        "ORDER BY order_date DESC LIMIT 50",
+                        (f"%{search_text}%", f"%{search_text}%")
+                    )
+                rows = cur.fetchall()
+            except Exception as e:
+                conn.close()
+                QMessageBox.critical(self, "Search Error", f"Failed to search orders: {e}")
+                return
+
+            if not rows:
+                conn.close()
+                QMessageBox.information(self, "No Results", "No orders found matching your search.")
+                return
+
+            # Let user pick from results
+            choices = []
+            for r in rows:
+                oid, lname, fname, odate, status = r
+                choices.append(f"ORD-{oid:03d}  {lname}, {fname}  ({odate})  [{status or 'N/A'}]")
+
+            choice, ok = QInputDialog.getItem(
+                self, "Select Order",
+                f"Link '{filename}' as {type_label} to which order?",
+                choices, 0, False
+            )
+            if not ok:
+                conn.close()
+                return
+
+            idx = choices.index(choice)
+            order_id = rows[idx][0]
+
+            # Determine which DB column to update
+            db_col = 'attached_signed_ticket_files' if doc_type == 'delivery' else 'attached_rx_files'
+
+            # Get existing files and append (store filename only)
+            cur.execute(f"SELECT {db_col} FROM orders WHERE id = ?", (order_id,))
+            row = cur.fetchone()
+            existing = row[0] if row and row[0] else ''
+            existing_list = [os.path.basename(p.strip()) for p in existing.replace(';', '\n').splitlines() if p.strip()]
+
+            if filename in existing_list:
+                conn.close()
+                QMessageBox.information(self, "Already Linked",
+                    f"This file is already linked to Order ORD-{order_id:03d} as {type_label}.")
+                return
+
+            existing_list.append(filename)
+            cur.execute(
+                f"UPDATE orders SET {db_col} = ? WHERE id = ?",
+                (";".join(existing_list), order_id)
+            )
+            conn.commit()
+            conn.close()
+
+            QMessageBox.information(self, "Linked",
+                f"'{filename}' linked to Order ORD-{order_id:03d} as {type_label}.")
+
+            # Refresh file list to update indicators
+            self.load_file_list()
+
+        except Exception as e:
+            print(f"_link_file_to_order error: {e}")
+            QMessageBox.critical(self, "Error", f"Failed to link file to order: {e}")
+
+    def _link_file_to_patient(self, filename):
+        """Link a file to a patient in the patient_documents table."""
+        try:
+            file_path = os.path.join(self.folder_path, filename)
+            if not os.path.exists(file_path):
+                QMessageBox.warning(self, "File Not Found", f"File '{filename}' not found.")
+                return
+
+            db = getattr(self, 'patient_database_file', None) or getattr(self, 'patient_db_path', None)
+            if not db or not os.path.exists(db):
+                QMessageBox.warning(self, "Database Error", "Patient database not found.")
+                return
+
+            # Prompt for patient name search
+            search_text, ok = QInputDialog.getText(
+                self, "Link to Patient",
+                "Enter patient last name or first name to search:"
+            )
+            if not ok or not search_text.strip():
+                return
+
+            search_text = search_text.strip()
+
+            conn = sqlite3.connect(db)
+            cur = conn.cursor()
+            try:
+                cur.execute(
+                    "SELECT id, last_name, first_name, dob FROM patients "
+                    "WHERE last_name LIKE ? OR first_name LIKE ? "
+                    "ORDER BY last_name, first_name LIMIT 50",
+                    (f"%{search_text}%", f"%{search_text}%")
+                )
+                rows = cur.fetchall()
+            except Exception as e:
+                conn.close()
+                QMessageBox.critical(self, "Search Error", f"Failed to search patients: {e}")
+                return
+
+            if not rows:
+                conn.close()
+                QMessageBox.information(self, "No Results", "No patients found matching your search.")
+                return
+
+            # Let user pick from results
+            choices = []
+            for r in rows:
+                pid, lname, fname, dob = r
+                choices.append(f"{lname}, {fname}  (DOB: {dob or 'N/A'})")
+
+            choice, ok = QInputDialog.getItem(
+                self, "Select Patient",
+                f"Link '{filename}' to which patient?",
+                choices, 0, False
+            )
+            if not ok:
+                conn.close()
+                return
+
+            idx = choices.index(choice)
+            patient_id = rows[idx][0]
+            patient_name = f"{rows[idx][1]}, {rows[idx][2]}"
+
+            # Ask for optional description
+            desc, ok2 = QInputDialog.getText(
+                self, "Document Description",
+                "Enter a description (optional):",
+                text=f"RX - {filename}"
+            )
+            if not ok2:
+                conn.close()
+                return
+
+            # Ensure patient_documents table exists
+            try:
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS patient_documents (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        patient_id INTEGER NOT NULL,
+                        description TEXT,
+                        original_name TEXT,
+                        stored_path TEXT,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    )
+                """)
+            except Exception:
+                pass
+
+            # Insert record (link in-place, no copy needed since it's a reference)
+            cur.execute(
+                "INSERT INTO patient_documents (patient_id, description, original_name, stored_path) "
+                "VALUES (?, ?, ?, ?)",
+                (patient_id, (desc or '').strip() or None, filename, file_path)
+            )
+            conn.commit()
+            conn.close()
+
+            QMessageBox.information(self, "Linked",
+                f"'{filename}' linked to patient {patient_name}.")
+
+            # Refresh file list to update indicators
+            self.load_file_list()
+
+        except Exception as e:
+            print(f"_link_file_to_patient error: {e}")
+            QMessageBox.critical(self, "Error", f"Failed to link file to patient: {e}")
     
     def rename_file(self, old_filename):
         """Rename the selected PDF file."""
@@ -18364,7 +19496,7 @@ class PDFViewer(QMainWindow):
                 # Find another file in the list
                 other_file = None
                 for i in range(self.file_list_widget.count()):
-                    item_text = self.file_list_widget.item(i).text()
+                    item_text = self._get_file_item_name(self.file_list_widget.item(i)) or self.file_list_widget.item(i).text()
                     if item_text != old_filename:
                         other_file = item_text
                         break
@@ -18372,7 +19504,7 @@ class PDFViewer(QMainWindow):
                 if other_file:
                     # Select and load the other file - this will close the current one
                     for i in range(self.file_list_widget.count()):
-                        if self.file_list_widget.item(i).text() == other_file:
+                        if (self._get_file_item_name(self.file_list_widget.item(i)) or self.file_list_widget.item(i).text()) == other_file:
                             self.file_list_widget.setCurrentRow(i)
                             break
                     # Give it a moment to load and close the old file
@@ -18425,7 +19557,7 @@ class PDFViewer(QMainWindow):
             # Refresh file list and select the renamed file
             self.load_file_list()
             for i in range(self.file_list_widget.count()):
-                if self.file_list_widget.item(i).text() == new_filename:
+                if (self._get_file_item_name(self.file_list_widget.item(i)) or self.file_list_widget.item(i).text()) == new_filename:
                     self.file_list_widget.setCurrentRow(i)
                     break
             
@@ -18494,7 +19626,7 @@ class PDFViewer(QMainWindow):
                 # Find another file in the list
                 other_file = None
                 for i in range(self.file_list_widget.count()):
-                    item_text = self.file_list_widget.item(i).text()
+                    item_text = self._get_file_item_name(self.file_list_widget.item(i)) or self.file_list_widget.item(i).text()
                     if item_text != filename:
                         other_file = item_text
                         break
@@ -18502,7 +19634,7 @@ class PDFViewer(QMainWindow):
                 if other_file:
                     # Select and load the other file - this will close the current one
                     for i in range(self.file_list_widget.count()):
-                        if self.file_list_widget.item(i).text() == other_file:
+                        if (self._get_file_item_name(self.file_list_widget.item(i)) or self.file_list_widget.item(i).text()) == other_file:
                             self.file_list_widget.setCurrentRow(i)
                             break
                     # Give it a moment to load and close the old file
@@ -18642,47 +19774,23 @@ class PDFViewer(QMainWindow):
         try:
             pdf_files = [f for f in os.listdir(self.folder_path) if f.lower().endswith('.pdf')]
             
-            # Sort by date extracted from filename (format: PHONENUMBER-MMDD-HHMMSS-NNN.pdf)
-            # Most recent first (reverse sort)
-            def extract_date_from_filename(filename):
-                try:
-                    from datetime import datetime
-                    # Split by hyphen and look for date pattern
-                    parts = filename.replace('.pdf', '').split('-')
-                    if len(parts) >= 3:
-                        # Second part is MMDD (4 digits), third part is HHMMSS (6 digits)
-                        date_str = parts[1]  # MMDD
-                        time_str = parts[2]  # HHMMSS
-                        
-                        if len(date_str) == 4 and date_str.isdigit():
-                            month = int(date_str[0:2])
-                            day = int(date_str[2:4])
-                            year = 2025  # Current year
-                            
-                            hour = 0
-                            minute = 0
-                            second = 0
-                            if len(time_str) == 6 and time_str.isdigit():
-                                hour = int(time_str[0:2])
-                                minute = int(time_str[2:4])
-                                second = int(time_str[4:6])
-                            
-                            return datetime(year, month, day, hour, minute, second)
-                except Exception as e:
-                    print(f"Date parse error for {filename}: {e}")
-                # Fallback to file modification time if parsing fails
-                try:
-                    from datetime import datetime
-                    return datetime.fromtimestamp(os.path.getmtime(os.path.join(self.folder_path, filename)))
-                except Exception:
-                    from datetime import datetime
-                    return datetime(1970, 1, 1)
+            # Sort based on current sort mode
+            sort_mode = getattr(self, '_file_sort_mode', 'date')
+            if sort_mode == 'name':
+                pdf_files.sort(key=str.lower)
+            else:
+                pdf_files.sort(key=lambda f: os.path.getctime(os.path.join(self.folder_path, f)), reverse=True)
             
-            # Sort with most recent first (reverse=True for descending order)
-            pdf_files.sort(key=extract_date_from_filename, reverse=True)
+            # Build link cache to show indicators
+            link_cache = self._build_file_link_cache()
             
             for filename in pdf_files:
-                self.file_list_widget.addItem(filename)
+                item = QListWidgetItem(filename)
+                item.setData(Qt.ItemDataRole.UserRole, filename)
+                icon = self._file_link_icon(filename, link_cache)
+                if icon:
+                    item.setIcon(icon)
+                self.file_list_widget.addItem(item)
 
             # Refresh filter dropdowns with new file data
             if hasattr(self, 'fax_filter_combo'):
@@ -18728,7 +19836,7 @@ class PDFViewer(QMainWindow):
             # Get current file list count before refresh
             old_count = self.file_list_widget.count()
             current_selection = self.file_list_widget.currentItem()
-            current_filename = current_selection.text() if current_selection else None
+            current_filename = self._get_file_item_name(current_selection) if current_selection else None
             
             # Refresh the list
             self.load_file_list()
@@ -18739,7 +19847,8 @@ class PDFViewer(QMainWindow):
             # Restore selection if file still exists
             if current_filename:
                 for i in range(self.file_list_widget.count()):
-                    if self.file_list_widget.item(i).text() == current_filename:
+                    item_name = self._get_file_item_name(self.file_list_widget.item(i))
+                    if item_name == current_filename:
                         self.file_list_widget.setCurrentRow(i)
                         break
             
@@ -18882,7 +19991,8 @@ class PDFViewer(QMainWindow):
     def backup_ocr_database(self):
         """Create a timestamped backup of the OCR database and prune older backups."""
         try:
-            db_path = r"C:\FaxManagerData\FaxManagerData\ocr_cache.db"
+            from dmelogic.paths import ocr_cache_db
+            db_path = str(ocr_cache_db())
             if not os.path.exists(db_path):
                 QMessageBox.warning(self, "Backup Failed", "OCR database not found")
                 return
@@ -18898,7 +20008,8 @@ class PDFViewer(QMainWindow):
     def cleanup_old_ocr_backups(self):
         """Keep only the last 7 OCR database backups in the data folder."""
         try:
-            db_dir = Path(r"C:\FaxManagerData\FaxManagerData")
+            from dmelogic.paths import ocr_cache_db
+            db_dir = ocr_cache_db().parent
             if not db_dir.exists():
                 return
             backups = sorted(db_dir.glob("ocr_cache_backup_*.db"), key=lambda p: p.stat().st_mtime)
@@ -19964,12 +21075,12 @@ class PDFViewer(QMainWindow):
             fields = dialog.fields
             
             # === PATIENT INFORMATION ===
-            # Patient name, DOB, and phone (for document viewer sidebar)
-            if 'patient_first_name' in fields:
+            # Patient name, DOB, and phone (for document viewer sidebar — removed)
+            if 'patient_first_name' in fields and hasattr(self, 'first_name_input'):
                 self.first_name_input.setText(fields['patient_first_name'].currentText().upper())
-            if 'patient_last_name' in fields:
+            if 'patient_last_name' in fields and hasattr(self, 'last_name_input'):
                 self.last_name_input.setText(fields['patient_last_name'].currentText().upper())
-            if 'patient_dob' in fields:
+            if 'patient_dob' in fields and hasattr(self, 'dob_input'):
                 self.dob_input.setText(fields['patient_dob'].text())
             if 'patient_phone' in fields and hasattr(self, 'phone_input'):
                 self.phone_input.setText(fields['patient_phone'].text())
@@ -20046,7 +21157,7 @@ class PDFViewer(QMainWindow):
                         items_summary.append(item_line)
                 
                 # Add items to notes if any were extracted
-                if items_summary and hasattr(self, 'new_note_input'):
+                if items_summary and hasattr(self, 'notes_history'):
                     items_note = "📦 OCR EXTRACTED ITEMS:\n" + "\n".join(items_summary)
                     current_notes = self.notes_history.toPlainText()
                     if current_notes:
@@ -20063,11 +21174,12 @@ class PDFViewer(QMainWindow):
                 if prescriber_npi:
                     prescriber_note += f"\n• NPI: {prescriber_npi}"
                 
-                current_notes = self.notes_history.toPlainText()
-                if current_notes:
-                    self.notes_history.setPlainText(current_notes + "\n\n" + prescriber_note)
-                else:
-                    self.notes_history.setPlainText(prescriber_note)
+                if hasattr(self, 'notes_history'):
+                    current_notes = self.notes_history.toPlainText()
+                    if current_notes:
+                        self.notes_history.setPlainText(current_notes + "\n\n" + prescriber_note)
+                    else:
+                        self.notes_history.setPlainText(prescriber_note)
             
             # Auto-save if current file is loaded
             if self.current_file:
@@ -20208,6 +21320,7 @@ class PDFViewer(QMainWindow):
             self.search_worker.progress.connect(self.on_search_progress)
             self.search_worker.finished.connect(self.on_search_finished)
             self.search_worker.error.connect(self.on_search_error)
+            self.search_worker.stale_files_pruned.connect(self.on_stale_files_pruned)
             self.search_worker.start()
 
             self.statusBar().showMessage(f"Searching for '{q}'...")
@@ -20222,6 +21335,15 @@ class PDFViewer(QMainWindow):
             self.search_progress.setValue(percent)
         if hasattr(self, 'search_status_label'):
             self.search_status_label.setText(f"Searching: {current_file}")
+
+    def on_stale_files_pruned(self, count):
+        """Notify user when stale OCR index entries were auto-removed."""
+        if count > 0:
+            self.statusBar().showMessage(
+                f"🧹 Cleaned {count} stale index entr{'y' if count == 1 else 'ies'} "
+                f"(files moved/deleted since indexing)", 8000
+            )
+            print(f"🧹 Auto-pruned {count} stale OCR index entries")
 
     def dedupe_results_by_file(self, rows):
         """Deduplicate results: one row per full_path, keep earliest page.
@@ -20270,23 +21392,25 @@ class PDFViewer(QMainWindow):
             # --- De-duplicate results (same file/page/match) ---
             unique = {}
             for r in results:
-                # Compute folder from rel_path if available
-                rel_path = r.get('rel_path', '') or ''
                 full_path = r.get('full_path', '')
                 
-                if rel_path:
-                    folder = os.path.dirname(rel_path)
-                elif full_path and hasattr(self, 'folder_path'):
+                # Always derive folder from full_path relative to folder_path
+                # (rel_path from OCR index may be missing for older entries)
+                folder = ''
+                if full_path and hasattr(self, 'folder_path') and self.folder_path:
                     try:
-                        rel_path = os.path.relpath(full_path, self.folder_path)
-                        folder = os.path.dirname(rel_path)
-                    except:
+                        computed_rel = os.path.relpath(full_path, self.folder_path)
+                        folder = os.path.dirname(computed_rel)
+                    except Exception:
                         folder = ''
-                else:
-                    folder = ''
                 
                 if not folder or folder == '.':
-                    folder = '(root)'
+                    # Fallback to rel_path from index if full_path failed
+                    rel_path = r.get('rel_path', '') or ''
+                    if rel_path:
+                        folder = os.path.dirname(rel_path)
+                    if not folder or folder == '.':
+                        folder = '(root)'
                 
                 r['folder'] = folder  # Store computed folder
                 
@@ -20365,25 +21489,107 @@ class PDFViewer(QMainWindow):
         self.statusBar().showMessage(f"Search error: {error_msg}", 5000)
     
     def browse_search_subfolder(self):
-        """Browse and select a subfolder to search within."""
+        """Browse and select a folder, then display its PDF files."""
         try:
             start_folder = self.folder_path if hasattr(self, 'folder_path') and self.folder_path else os.path.expanduser("~")
             subfolder = QFileDialog.getExistingDirectory(
                 self,
-                "Select Folder to Search",
+                "Select Folder to Browse",
                 start_folder,
                 QFileDialog.Option.ShowDirsOnly
             )
             
             if subfolder:
-                # Temporarily update folder_path for this search
                 self.folder_path = subfolder
-                self.statusBar().showMessage(f"Search folder set to: {os.path.basename(subfolder)}")
-                # Optionally auto-trigger search
-                # self.perform_search_from_drawer()
+                self._update_browse_folder_label()
+                self.statusBar().showMessage(f"Browsing: {subfolder}")
+
+                # Reload the file list panel on the right
+                if hasattr(self, 'load_file_list'):
+                    self.load_file_list()
+
+                # Populate search results table with all PDFs in the folder
+                self._populate_browse_results(subfolder)
         except Exception as e:
             QMessageBox.warning(self, "Browse Error", f"Failed to browse folder: {e}")
             print(f"Browse subfolder error: {e}")
+
+    def _update_browse_folder_label(self):
+        """Update the label showing the current browsed folder path."""
+        if hasattr(self, 'browse_folder_label') and hasattr(self, 'folder_path') and self.folder_path:
+            self.browse_folder_label.setText(f"📁 {self.folder_path}")
+        elif hasattr(self, 'browse_folder_label'):
+            self.browse_folder_label.setText("")
+
+    def _populate_browse_results(self, folder_path):
+        """Populate the search results table with all PDF files from the browsed folder."""
+        from PyQt6.QtWidgets import QTreeWidgetItem
+        from PyQt6.QtCore import Qt
+        from PyQt6.QtGui import QBrush, QColor
+
+        if not hasattr(self, 'search_results_table'):
+            return
+
+        table = self.search_results_table
+        table.setSortingEnabled(False)
+        table.clear()
+
+        try:
+            # Walk folder and subfolders for PDFs
+            pdf_entries = []
+            for root, dirs, files in os.walk(folder_path):
+                for f in files:
+                    if f.lower().endswith('.pdf'):
+                        full_path = os.path.join(root, f)
+                        try:
+                            ctime = os.path.getctime(full_path)
+                        except OSError:
+                            ctime = 0
+                        rel = os.path.relpath(root, folder_path)
+                        folder_col = '' if rel == '.' else rel
+                        pdf_entries.append((f, folder_col, full_path, ctime))
+
+            # Sort most recent first
+            pdf_entries.sort(key=lambda x: x[3], reverse=True)
+
+            for filename, folder_col, full_path, ctime in pdf_entries:
+                item = QTreeWidgetItem()
+                item.setText(0, filename)
+                item.setText(1, folder_col if folder_col else "(root)")
+                item.setText(2, "")   # Page – N/A for browse
+                item.setText(3, "")   # Match – N/A for browse
+                item.setText(4, "Browse")
+
+                for col in range(5):
+                    item.setForeground(col, QBrush(QColor("#1e293b")))
+
+                # Store result dict so clicking opens the file
+                result = {
+                    'filename': filename,
+                    'full_path': full_path,
+                    'page': 0,
+                    'match_text': '',
+                    'match_type': 'Browse',
+                    'folder': folder_col,
+                }
+                item.setData(0, Qt.ItemDataRole.UserRole, result)
+                table.addTopLevelItem(item)
+
+            table.resizeColumnToContents(0)
+            table.resizeColumnToContents(1)
+            table.setSortingEnabled(True)
+
+            count = len(pdf_entries)
+            if hasattr(self, 'search_status_label'):
+                self.search_status_label.setText(f"{count} file(s) in folder")
+            self.statusBar().showMessage(
+                f"Browsing: {count} PDF file{'s' if count != 1 else ''} in {os.path.basename(folder_path)}", 5000
+            )
+
+        except Exception as e:
+            print(f"Error populating browse results: {e}")
+            import traceback
+            traceback.print_exc()
 
     def populate_fax_filter(self):
         """Populate fax filter combo with unique fax numbers parsed from filenames (best-effort)."""
@@ -20453,7 +21659,7 @@ class PDFViewer(QMainWindow):
             target = set(files_with_results or [])
             for i in range(self.file_list_widget.count()):
                 it = self.file_list_widget.item(i)
-                name = it.text()
+                name = self._get_file_item_name(it) or it.text()
                 if name in target:
                     it.setBackground(QBrush(QColor(255, 255, 0)))
                     it.setForeground(QBrush(QColor(0, 0, 0)))
@@ -20488,13 +21694,13 @@ class PDFViewer(QMainWindow):
         try:
             if previous_item is not None:
                 try:
-                    self.save_data(previous_item.text())
+                    self.save_data(self._get_file_item_name(previous_item))
                 except Exception:
                     pass
             # DON'T reset - we want to load data from database to keep tags attached to files
             # The load_data() call below will populate the fields with saved data
             if current_item is not None:
-                self.current_file = current_item.text()
+                self.current_file = self._get_file_item_name(current_item)
                 # Load data FIRST to populate fields immediately
                 try:
                     self.load_data(self.current_file)
@@ -20592,11 +21798,14 @@ class PDFViewer(QMainWindow):
                 item = self.file_list_widget.item(row)
                 if not item:
                     continue
+                item_name = self._get_file_item_name(item) or ''
                 item_text = item.text()
                 # Strip star prefix (★ ) if present
                 clean = item_text.lstrip('\u2605 ')
-                if (item_text == base or item_text == filename
+                if (item_name == base or item_name == filename
+                        or item_text == base or item_text == filename
                         or clean == base
+                        or item_name.lower() == base_lower
                         or item_text.lower() == base_lower
                         or clean.lower() == base_lower):
                     self.file_list_widget.setCurrentRow(row)
@@ -21066,6 +22275,14 @@ class PDFViewer(QMainWindow):
         scan_fax_action.triggered.connect(self.scan_and_attach_fax_forms)
         tools_menu.addAction(scan_fax_action)
 
+        tools_menu.addSeparator()
+
+        # PDF Tool — Merge / Split
+        pdf_tool_action = QAction('📄 PDF Tool (Merge / Split)…', self)
+        pdf_tool_action.setToolTip('Merge multiple PDFs or extract specific pages from a PDF')
+        pdf_tool_action.triggered.connect(self.open_pdf_tool)
+        tools_menu.addAction(pdf_tool_action)
+
     def show_hcpcs_manager(self):
         """Show the HCPCS description manager dialog."""
         try:
@@ -21075,12 +22292,28 @@ class PDFViewer(QMainWindow):
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Failed to open HCPCS manager: {e}")
 
+    def open_pdf_tool(self):
+        """Open the PDF merge/split tool."""
+        try:
+            from dmelogic.ui.dialogs.pdf_tool import PDFToolDialog
+            # If a PDF is currently open, pass it as initial file for extract tab
+            initial = ""
+            if hasattr(self, 'current_file') and self.current_file and str(self.current_file).lower().endswith('.pdf'):
+                initial = str(self.current_file)
+            dlg = PDFToolDialog(self, initial_file=initial)
+            dlg.show()
+            dlg.raise_()
+            dlg.activateWindow()
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to open PDF Tool: {e}")
+
     def open_ocr_folder(self):
         """Open the OCR folder in Windows Explorer."""
         import subprocess
+        from dmelogic.paths import ocr_folder as _ocr_folder
         
-        # Check for network folder first, then local
-        main_folder = r"C:\FaxManagerData\FaxManagerData\Faxes OCR'd"
+        # Check for configured folder first, then local
+        main_folder = str(_ocr_folder())
         local_folder = "faxes"
         
         if os.path.exists(main_folder):
@@ -22109,6 +23342,12 @@ class PDFViewer(QMainWindow):
         # Prescriber phone number stored per-order
         try:
             cursor.execute("ALTER TABLE orders ADD COLUMN prescriber_phone TEXT")
+        except sqlite3.OperationalError:
+            pass  # Column already exists
+        
+        # Billing alert note — shown as popup when EPACES helper opens
+        try:
+            cursor.execute("ALTER TABLE orders ADD COLUMN epaces_alert TEXT")
         except sqlite3.OperationalError:
             pass  # Column already exists
         
@@ -30151,7 +31390,7 @@ class PDFViewer(QMainWindow):
         pass
 
     def create_order_from_rx(self):
-        """Extract prescription data and create a new order with pre-populated information."""
+        """Launch the Smart Rx Import Wizard with the current file pre-loaded."""
         try:
             if not getattr(self, 'current_file', None):
                 QMessageBox.information(self, "Create Order", "No prescription file selected.")
@@ -30167,85 +31406,394 @@ class PDFViewer(QMainWindow):
                 QMessageBox.warning(self, "Create Order", "Prescription file not found.")
                 return
 
-            # Run OCR to extract text from the prescription
-            QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
-            extracted_text = extract_text_from_pdf(file_path)
-            QApplication.restoreOverrideCursor()
+            # Launch the Smart Rx Import Wizard with this file pre-loaded
+            from dmelogic.ui.rx_import_wizard import RxImportWizard
+            wizard = RxImportWizard(
+                folder_path=getattr(self, 'folder_path', None),
+                parent=self,
+            )
 
-            if not extracted_text:
-                QMessageBox.warning(self, "Create Order", "Could not extract text from prescription. Please create order manually.")
-                return
+            # Pre-load the selected file
+            wizard.attachment_paths = [file_path]
+            wizard.file_list.clear()
+            wizard.file_list.addItem(os.path.basename(file_path))
+            wizard._parse_files()
 
-            # Parse prescription data
-            rx_data = self.parse_prescription_data(extracted_text)
-            
-            # Create new order dialog with pre-populated data
-            dialog = NewOrderDialog(self, order_data=None, order_items=None, order_id=None)
-            dialog.setWindowTitle("📋 New Order from Prescription")
-            
-            # Pre-populate fields if data was extracted
-            if rx_data.get('patient_name'):
-                # Try to find and select patient
-                patient_name = rx_data['patient_name']
-                for i in range(dialog.patient_combo.count()):
-                    if patient_name.upper() in dialog.patient_combo.itemText(i).upper():
-                        dialog.patient_combo.setCurrentIndex(i)
-                        break
-            
-            if rx_data.get('prescriber_name'):
-                # Try to select matching prescriber by name (case-insensitive)
-                prescriber_name = rx_data['prescriber_name']
-                matched = False
-                for i in range(dialog.prescriber_combo.count()):
-                    if prescriber_name.upper() in dialog.prescriber_combo.itemText(i).upper():
-                        dialog.prescriber_combo.setCurrentIndex(i)
-                        matched = True
-                        break
-                if not matched:
-                    dialog.prescriber_combo.setCurrentText(prescriber_name)
+            # Connect signals to refresh orders after creation
+            wizard.order_created.connect(lambda oid: self.load_orders() if hasattr(self, 'load_orders') else None)
+            wizard.order_created.connect(lambda oid: self.load_patients() if hasattr(self, 'load_patients') else None)
 
-            if rx_data.get('npi'):
-                # Update the read-only NPI label in the dialog
-                try:
-                    dialog.prescriber_npi_label.setText(rx_data['npi'])
-                except Exception:
-                    pass
-            
-            if rx_data.get('rx_date'):
-                try:
-                    rx_date = QDate.fromString(rx_data['rx_date'], "MM/dd/yyyy")
-                    if rx_date.isValid():
-                        dialog.rx_date_edit.setDate(rx_date)
-                except:
-                    pass
-            
-            # Add note about source prescription
-            current_notes = dialog.notes_text.toPlainText()
-            source_note = f"Created from prescription: {clean_filename}\n\n"
-            if rx_data.get('diagnosis'):
-                source_note += f"Diagnosis: {rx_data['diagnosis']}\n"
-            if rx_data.get('prescription_details'):
-                source_note += f"Prescription: {rx_data['prescription_details']}\n"
-            dialog.notes_text.setPlainText(source_note + current_notes)
-            
-            # Automatically attach the source RX file (track list and visible list widget)
-            try:
-                if hasattr(dialog, '_attached_rx_files'):
-                    if file_path not in dialog._attached_rx_files:
-                        dialog._attached_rx_files.append(file_path)
-                if hasattr(dialog, 'rx_list'):
-                    dialog.rx_list.addItem(file_path)
-            except Exception:
-                pass
-            
-            # Show dialog
-            if dialog.exec() == QDialog.DialogCode.Accepted:
-                QMessageBox.information(self, "Success", "Order created successfully from prescription!")
-                
+            wizard.exec()
+
         except Exception as e:
-            QApplication.restoreOverrideCursor()
             QMessageBox.critical(self, "Error", f"Failed to create order from prescription: {e}")
             print(f"Error creating order from RX: {e}")
+
+    def _show_rx_to_order_dialog(self, extracted_data: dict, full_text: str, file_path: str, clean_filename: str):
+        """Show OCR confirmation dialog, then open NewOrderDialog with confirmed data."""
+        import re
+        # Stop auto-refresh while dialog is open
+        if hasattr(self, 'auto_refresh_timer'):
+            self.auto_refresh_timer.stop()
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle("📋 Import RX → Create Order")
+        dialog.setMinimumWidth(1400)
+        dialog.setMinimumHeight(850)
+
+        main_layout = QHBoxLayout(dialog)
+
+        # === LEFT SIDE: PDF VIEWER ===
+        pdf_viewer_widget = QWidget()
+        pdf_viewer_layout = QVBoxLayout(pdf_viewer_widget)
+        pdf_viewer_layout.setContentsMargins(0, 0, 0, 0)
+
+        pdf_label = QLabel()
+        pdf_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        pdf_label.setStyleSheet("background-color: #2b2b2b; border: 2px solid #555;")
+        pdf_label.setMinimumSize(500, 600)
+
+        nav_layout = QHBoxLayout()
+        prev_btn = QPushButton("◀ Previous")
+        page_label = QLabel("Page 1")
+        page_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        page_label.setStyleSheet("font-weight: bold; font-size: 12px;")
+        next_btn = QPushButton("Next ▶")
+        nav_layout.addWidget(prev_btn)
+        nav_layout.addWidget(page_label, 1)
+        nav_layout.addWidget(next_btn)
+
+        zoom_layout = QHBoxLayout()
+        zoom_out_btn = QPushButton("🔍-")
+        zoom_out_btn.setMaximumWidth(50)
+        zoom_label = QLabel("100%")
+        zoom_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        zoom_label.setStyleSheet("font-weight: bold; font-size: 11px; min-width: 50px;")
+        zoom_in_btn = QPushButton("🔍+")
+        zoom_in_btn.setMaximumWidth(50)
+        zoom_reset_btn = QPushButton("Reset")
+        zoom_reset_btn.setMaximumWidth(60)
+        zoom_layout.addWidget(QLabel("Zoom:"))
+        zoom_layout.addWidget(zoom_out_btn)
+        zoom_layout.addWidget(zoom_label)
+        zoom_layout.addWidget(zoom_in_btn)
+        zoom_layout.addWidget(zoom_reset_btn)
+        zoom_layout.addStretch()
+
+        pdf_viewer_layout.addWidget(pdf_label)
+        pdf_viewer_layout.addLayout(nav_layout)
+        pdf_viewer_layout.addLayout(zoom_layout)
+
+        dialog.pdf_label = pdf_label
+        dialog.page_label = page_label
+        dialog.zoom_label = zoom_label
+        dialog.current_page = 0
+        dialog.zoom_level = 1.2
+
+        try:
+            import fitz
+            dialog.pdf_doc = fitz.open(file_path)
+            dialog.total_pages = len(dialog.pdf_doc)
+
+            def render_pdf_page():
+                try:
+                    page = dialog.pdf_doc[dialog.current_page]
+                    mat = fitz.Matrix(dialog.zoom_level, dialog.zoom_level)
+                    pix = page.get_pixmap(matrix=mat)
+                    from PyQt6.QtGui import QImage, QPixmap
+                    img = QImage(pix.samples, pix.width, pix.height, pix.stride, QImage.Format.Format_RGB888)
+                    pixmap = QPixmap.fromImage(img)
+                    scaled = pixmap.scaled(pdf_label.width() - 10, pdf_label.height() - 10,
+                                           Qt.AspectRatioMode.KeepAspectRatio,
+                                           Qt.TransformationMode.SmoothTransformation)
+                    pdf_label.setPixmap(scaled)
+                    page_label.setText(f"Page {dialog.current_page + 1} of {dialog.total_pages}")
+                except Exception as e:
+                    pdf_label.setText(f"Error rendering page:\n{str(e)}")
+
+            prev_btn.clicked.connect(lambda: (setattr(dialog, 'current_page', max(0, dialog.current_page - 1)), render_pdf_page()))
+            next_btn.clicked.connect(lambda: (setattr(dialog, 'current_page', min(dialog.total_pages - 1, dialog.current_page + 1)), render_pdf_page()))
+            zoom_in_btn.clicked.connect(lambda: (setattr(dialog, 'zoom_level', min(dialog.zoom_level + 0.2, 3.0)), zoom_label.setText(f"{int(dialog.zoom_level*100)}%"), render_pdf_page()))
+            zoom_out_btn.clicked.connect(lambda: (setattr(dialog, 'zoom_level', max(dialog.zoom_level - 0.2, 0.4)), zoom_label.setText(f"{int(dialog.zoom_level*100)}%"), render_pdf_page()))
+            zoom_reset_btn.clicked.connect(lambda: (setattr(dialog, 'zoom_level', 1.2), zoom_label.setText("120%"), render_pdf_page()))
+
+            render_pdf_page()
+            page_label.setText(f"Page 1 of {dialog.total_pages}")
+            zoom_label.setText(f"{int(dialog.zoom_level * 100)}%")
+        except Exception as e:
+            pdf_label.setText(f"Could not load PDF preview:\n{e}")
+
+        main_layout.addWidget(pdf_viewer_widget, 1)
+
+        # === RIGHT SIDE: FORM FIELDS ===
+        form_widget = QWidget()
+        layout = QVBoxLayout(form_widget)
+
+        header = QLabel("Review extracted RX data, then create order:")
+        header.setStyleSheet("font-size: 14px; font-weight: bold; color: #0078D4; margin-bottom: 10px;")
+        layout.addWidget(header)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll_widget = QWidget()
+        scroll_layout = QVBoxLayout(scroll_widget)
+
+        dialog.fields = {}
+
+        group_style = """
+            QGroupBox {
+                font-weight: bold; border: 2px solid #0078D4;
+                border-radius: 5px; margin-top: 10px; padding-top: 10px;
+            }
+            QGroupBox::title {
+                color: #0078D4; subcontrol-origin: margin; left: 10px; padding: 0 5px;
+            }
+        """
+
+        # --- Patient ---
+        patient_group = QGroupBox("👤 Patient Information")
+        patient_group.setStyleSheet(group_style)
+        p_layout = QFormLayout(patient_group)
+
+        last_name_combo = QComboBox()
+        last_name_combo.setEditable(True)
+        if extracted_data['patient_last_name']:
+            last_name_combo.setCurrentText(extracted_data['patient_last_name'])
+            self.populate_patient_matches(last_name_combo, extracted_data['patient_last_name'])
+        p_layout.addRow("Last Name:", last_name_combo)
+        dialog.fields['patient_last_name'] = last_name_combo
+
+        first_name_combo = QComboBox()
+        first_name_combo.setEditable(True)
+        if extracted_data['patient_first_name']:
+            first_name_combo.setCurrentText(extracted_data['patient_first_name'])
+        p_layout.addRow("First Name:", first_name_combo)
+        dialog.fields['patient_first_name'] = first_name_combo
+
+        dob_input = QLineEdit(extracted_data['patient_dob'] or "")
+        dob_input.setPlaceholderText("MM/DD/YYYY")
+        p_layout.addRow("Date of Birth:", dob_input)
+        dialog.fields['patient_dob'] = dob_input
+
+        phone_input = QLineEdit(extracted_data['patient_phone'] or "")
+        phone_input.setPlaceholderText("(XXX) XXX-XXXX")
+        p_layout.addRow("Phone:", phone_input)
+        dialog.fields['patient_phone'] = phone_input
+
+        scroll_layout.addWidget(patient_group)
+
+        # --- Diagnosis ---
+        diagnosis_group = QGroupBox("🩺 Diagnosis (ICD-10)")
+        diagnosis_group.setStyleSheet(group_style)
+        d_layout = QVBoxLayout(diagnosis_group)
+        icd10_text = QTextEdit()
+        icd10_text.setMaximumHeight(80)
+        icd10_text.setPlainText(', '.join(extracted_data['icd10_codes']))
+        icd10_text.setPlaceholderText("Enter ICD-10 codes separated by commas")
+        d_layout.addWidget(icd10_text)
+        dialog.fields['icd10_codes'] = icd10_text
+        scroll_layout.addWidget(diagnosis_group)
+
+        # --- Prescriber ---
+        prescriber_group = QGroupBox("👨‍⚕️ Prescriber Information")
+        prescriber_group.setStyleSheet(group_style)
+        rx_layout = QFormLayout(prescriber_group)
+
+        prescriber_combo = QComboBox()
+        prescriber_combo.setEditable(True)
+        if extracted_data['prescriber_name']:
+            prescriber_combo.setCurrentText(extracted_data['prescriber_name'])
+            self.populate_prescriber_matches(prescriber_combo, extracted_data['prescriber_name'])
+        rx_layout.addRow("Prescriber Name:", prescriber_combo)
+        dialog.fields['prescriber_name'] = prescriber_combo
+
+        npi_input = QLineEdit(extracted_data['prescriber_npi'] or "")
+        npi_input.setPlaceholderText("10-digit NPI")
+        rx_layout.addRow("NPI:", npi_input)
+        dialog.fields['prescriber_npi'] = npi_input
+        scroll_layout.addWidget(prescriber_group)
+
+        # --- Items ---
+        items_group = QGroupBox("📦 Items/Equipment")
+        items_group.setStyleSheet(group_style)
+        i_layout = QVBoxLayout(items_group)
+        items_table = QTableWidget()
+        items_table.setColumnCount(3)
+        items_table.setHorizontalHeaderLabels(["Description", "Qty", "Delete"])
+        items_table.setRowCount(max(len(extracted_data['items']), 3))
+        items_table.setColumnWidth(0, 350)
+        items_table.setColumnWidth(1, 60)
+        items_table.setColumnWidth(2, 60)
+
+        def delete_item_row():
+            button = items_table.sender()
+            if button:
+                for row in range(items_table.rowCount()):
+                    if items_table.cellWidget(row, 2) == button:
+                        items_table.removeRow(row)
+                        break
+
+        for row, item in enumerate(extracted_data['items']):
+            desc_combo = QComboBox()
+            desc_combo.setEditable(True)
+            desc_combo.setCurrentText(item['description'])
+            self.populate_inventory_matches(desc_combo, item['description'])
+            items_table.setCellWidget(row, 0, desc_combo)
+
+            qty_spin = QSpinBox()
+            qty_spin.setMinimum(1)
+            qty_spin.setMaximum(999)
+            qty_spin.setValue(item['quantity'])
+            items_table.setCellWidget(row, 1, qty_spin)
+
+            del_btn = QPushButton("🗑")
+            del_btn.setMaximumWidth(50)
+            del_btn.setStyleSheet("background-color: #E74C3C; color: white; font-weight: bold;")
+            del_btn.clicked.connect(delete_item_row)
+            items_table.setCellWidget(row, 2, del_btn)
+
+        items_table.setMinimumHeight(180)
+        i_layout.addWidget(items_table)
+        dialog.fields['items_table'] = items_table
+        scroll_layout.addWidget(items_group)
+
+        scroll.setWidget(scroll_widget)
+        layout.addWidget(scroll)
+
+        # --- Buttons ---
+        button_layout = QHBoxLayout()
+
+        create_btn = QPushButton("📋 Create Order")
+        create_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #27AE60; color: white;
+                font-weight: bold; padding: 10px 20px; border-radius: 4px; font-size: 12pt;
+            }
+            QPushButton:hover { background-color: #229954; }
+        """)
+
+        cancel_btn = QPushButton("✗ Cancel")
+        cancel_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #95A5A6; color: white;
+                font-weight: bold; padding: 10px 20px; border-radius: 4px;
+            }
+            QPushButton:hover { background-color: #7F8C8D; }
+        """)
+        cancel_btn.clicked.connect(lambda: [dialog.reject(), self._restart_auto_refresh()])
+
+        def on_create_order():
+            """Collect confirmed data and open NewOrderDialog."""
+            try:
+                # Gather confirmed fields
+                patient_last = last_name_combo.currentText().strip()
+                patient_first = first_name_combo.currentText().strip()
+                patient_dob_val = dob_input.text().strip()
+                prescriber_name_val = prescriber_combo.currentText().strip()
+                prescriber_npi_val = npi_input.text().strip()
+                icd_codes = [c.strip().upper() for c in icd10_text.toPlainText().replace(',', ' ').split() if c.strip()]
+
+                # Collect items
+                confirmed_items = []
+                for row in range(items_table.rowCount()):
+                    desc_w = items_table.cellWidget(row, 0)
+                    qty_w = items_table.cellWidget(row, 1)
+                    if desc_w and desc_w.currentText().strip():
+                        hcpcs_match = re.search(r'\(([A-Z]\d{3,4})\)', desc_w.currentText())
+                        hcpcs = hcpcs_match.group(1) if hcpcs_match else ''
+                        confirmed_items.append({
+                            'description': desc_w.currentText().strip(),
+                            'hcpcs': hcpcs,
+                            'quantity': qty_w.value() if qty_w else 1,
+                        })
+
+                # Close confirmation dialog
+                dialog.accept()
+
+                # Open NewOrderDialog with confirmed data
+                order_dlg = NewOrderDialog(self, order_data=None, order_items=None, order_id=None)
+                order_dlg.setWindowTitle("📋 New Order from Prescription")
+
+                # Patient
+                patient_display = f"{patient_last}, {patient_first}" if patient_last and patient_first else ""
+                if patient_display:
+                    matched = False
+                    for i in range(order_dlg.patient_combo.count()):
+                        if patient_display.upper() in order_dlg.patient_combo.itemText(i).upper():
+                            order_dlg.patient_combo.setCurrentIndex(i)
+                            matched = True
+                            break
+                    if not matched:
+                        # Try last name only match
+                        for i in range(order_dlg.patient_combo.count()):
+                            if patient_last.upper() in order_dlg.patient_combo.itemText(i).upper():
+                                order_dlg.patient_combo.setCurrentIndex(i)
+                                matched = True
+                                break
+                    if not matched:
+                        order_dlg.patient_combo.setCurrentText(patient_display)
+
+                # Prescriber
+                if prescriber_name_val:
+                    matched = False
+                    for i in range(order_dlg.prescriber_combo.count()):
+                        if prescriber_name_val.upper() in order_dlg.prescriber_combo.itemText(i).upper():
+                            order_dlg.prescriber_combo.setCurrentIndex(i)
+                            matched = True
+                            break
+                    if not matched:
+                        order_dlg.prescriber_combo.setCurrentText(prescriber_name_val)
+
+                if prescriber_npi_val:
+                    try:
+                        order_dlg.prescriber_npi_label.setText(prescriber_npi_val)
+                    except Exception:
+                        pass
+
+                # ICD codes
+                if icd_codes and hasattr(order_dlg, 'icd_code_1'):
+                    icd_fields = [order_dlg.icd_code_1, order_dlg.icd_code_2, order_dlg.icd_code_3,
+                                  order_dlg.icd_code_4, order_dlg.icd_code_5]
+                    for i, code in enumerate(icd_codes[:5]):
+                        if i < len(icd_fields):
+                            icd_fields[i].setText(code)
+
+                # Notes
+                source_note = f"Created from prescription: {clean_filename}"
+                if patient_dob_val:
+                    source_note += f"\nPatient DOB: {patient_dob_val}"
+                order_dlg.notes_text.setPlainText(source_note)
+
+                # Attach RX file
+                try:
+                    if hasattr(order_dlg, '_attached_rx_files') and file_path not in order_dlg._attached_rx_files:
+                        order_dlg._attached_rx_files.append(file_path)
+                    if hasattr(order_dlg, 'rx_list'):
+                        order_dlg.rx_list.addItem(file_path)
+                except Exception:
+                    pass
+
+                # Show order dialog
+                if order_dlg.exec() == QDialog.DialogCode.Accepted:
+                    self.statusBar().showMessage("✅ Order created from prescription!", 5000)
+
+                self._restart_auto_refresh()
+
+            except Exception as e:
+                QMessageBox.critical(self, "Error", f"Failed to create order: {e}")
+                print(f"Error in on_create_order: {e}")
+                import traceback
+                traceback.print_exc()
+
+        create_btn.clicked.connect(on_create_order)
+
+        button_layout.addStretch()
+        button_layout.addWidget(create_btn)
+        button_layout.addWidget(cancel_btn)
+        layout.addLayout(button_layout)
+
+        main_layout.addWidget(form_widget, 1)
+        dialog.exec()
 
     def parse_prescription_data(self, text):
         """Parse prescription text to extract relevant data."""
@@ -30413,6 +31961,8 @@ class PDFViewer(QMainWindow):
                                         except Exception:
                                             n = 0
                                         cursor.execute("UPDATE order_items SET refills = ? WHERE id = ?", (str(n + 1), it_id))
+                                    # Unlock parent and clear refill_completed so it can be refilled again
+                                    cursor.execute("UPDATE orders SET refill_completed = 0, refill_completed_at = NULL, is_locked = 0 WHERE id = ?", (prev_id,))
                                     conn.commit()
                             # Proceed to delete items and main order
                             cursor.execute("DELETE FROM order_items WHERE order_id = ?", (order_id_val,))
@@ -31032,6 +32582,74 @@ class PDFViewer(QMainWindow):
     def filter_billing_records(self, *args, **kwargs):
         """Stub method for filter_billing_records"""
         pass
+
+    def _generate_last_report(self):
+        """Re-run the last selected report (used by the Generate Report button)."""
+        if self._last_report_fn:
+            self._last_report_fn()
+        else:
+            QMessageBox.information(
+                self, "No Report Selected",
+                "Please click a report button first (e.g. Patient Report, "
+                "Billing Report, AR Aging, etc.), then use Generate Report "
+                "to refresh with a new date range."
+            )
+
+    def open_ar_report(self):
+        """Open the Accounts Receivable Aging report."""
+        try:
+            from dmelogic.reports.standalone import ClaimsAgingReport
+            billing_path = getattr(self, 'billing_database_file', '') or ''
+            orders_path = getattr(self, 'orders_database_file', '') or ''
+            dialog = ClaimsAgingReport(
+                self,
+                billing_db_path=billing_path,
+                orders_db_path=orders_path,
+            )
+            dialog.show()
+            dialog.raise_()
+            dialog.activateWindow()
+        except Exception as e:
+            QMessageBox.critical(self, "Report Error",
+                                 f"Failed to open AR report:\n{e}")
+            import traceback
+            traceback.print_exc()
+
+    def open_refills_due_report(self):
+        """Open the Refills Due report."""
+        try:
+            from dmelogic.reports.standalone import RefillsDueReport
+            orders_path = getattr(self, 'orders_database_file', '') or ''
+            dialog = RefillsDueReport(
+                self,
+                orders_db_path=orders_path,
+            )
+            dialog.show()
+            dialog.raise_()
+            dialog.activateWindow()
+        except Exception as e:
+            QMessageBox.critical(self, "Report Error",
+                                 f"Failed to open Refills Due report:\n{e}")
+            import traceback
+            traceback.print_exc()
+
+    def open_order_analytics(self):
+        """Open the Order Volume Analytics report."""
+        try:
+            from dmelogic.reports.standalone import OrderVolumeAnalyticsReport
+            orders_path = getattr(self, 'orders_database_file', '') or ''
+            dialog = OrderVolumeAnalyticsReport(
+                self,
+                orders_db_path=orders_path,
+            )
+            dialog.show()
+            dialog.raise_()
+            dialog.activateWindow()
+        except Exception as e:
+            QMessageBox.critical(self, "Report Error",
+                                 f"Failed to open Order Analytics report:\n{e}")
+            import traceback
+            traceback.print_exc()
 
     def generate_billing_report(self):
         """Generate billing analytics report from billing.db (claims and payments) with structured table and PDF output."""
@@ -31854,8 +33472,9 @@ class PDFViewer(QMainWindow):
 
             params = []
             date_clause = ""
+            status_clause = " WHERE LOWER(COALESCE(order_status,'')) IN ('billed','shipped','delivered','picked up')"
             if start_date and end_date:
-                date_clause = f" WHERE {norm_used_date} BETWEEN ? AND ?"
+                date_clause = f" AND {norm_used_date} BETWEEN ? AND ?"
                 params = [start_date, end_date]
 
             cur.execute(
@@ -31863,7 +33482,7 @@ class PDFViewer(QMainWindow):
                 SELECT id, COALESCE(NULLIF(order_date,''), rx_date) AS used_date,
                        COALESCE(patient_last_name,''), COALESCE(patient_first_name,''),
                        COALESCE(order_status,'')
-                FROM orders{date_clause}
+                FROM orders{status_clause}{date_clause}
                 ORDER BY {norm_used_date} DESC, id DESC
                 """,
                 params,
@@ -32973,6 +34592,33 @@ class PDFViewer(QMainWindow):
                 (last_name, first_name, dob),
             )
             orders = cur.fetchall()
+
+            # Fallback: if no orders found (stale refill_completed flags), show ALL orders
+            if not orders:
+                cur.execute(
+                    """
+                    SELECT id, rx_date, order_status, COALESCE(refill_number,0)
+                    FROM orders
+                    WHERE UPPER(patient_last_name)=UPPER(?) AND UPPER(patient_first_name)=UPPER(?) AND COALESCE(patient_dob,'')=COALESCE(?, '')
+                    ORDER BY rx_date ASC, id ASC
+                    """,
+                    (last_name, first_name, dob),
+                )
+                orders = cur.fetchall()
+                # Auto-fix: clear stale refill_completed and is_locked flags
+                for (oid, *_rest) in orders:
+                    cur.execute(
+                        "SELECT COUNT(*) FROM orders WHERE parent_order_id = ?",
+                        (oid,),
+                    )
+                    child_count = cur.fetchone()[0]
+                    if child_count == 0:
+                        cur.execute(
+                            "UPDATE orders SET refill_completed = 0, refill_completed_at = NULL, is_locked = 0 WHERE id = ? AND (COALESCE(refill_completed, 0) = 1 OR COALESCE(is_locked, 0) = 1)",
+                            (oid,),
+                        )
+                conn.commit()
+
             conn.close()
 
             dlg = QDialog(self)
@@ -35190,6 +36836,9 @@ class PDFViewer(QMainWindow):
                                 n = 0
                             cursor.execute("UPDATE order_items SET refills = ? WHERE id = ?", (str(n + 1), it_id))
 
+                        # Unlock parent and clear refill_completed so it can be refilled again
+                        cursor.execute("UPDATE orders SET refill_completed = 0, refill_completed_at = NULL, is_locked = 0 WHERE id = ?", (prev_id,))
+
                 # Delete the order and its items
                 cursor.execute("DELETE FROM order_items WHERE order_id = ?", (order_id_val,))
                 cursor.execute("DELETE FROM orders WHERE id = ?", (order_id_val,))
@@ -35222,13 +36871,269 @@ class PDFViewer(QMainWindow):
         except Exception:
             return -1
 
+    def _show_refill_history_popup(self, base_id, chain):
+        """Show a full-width popup dialog with the complete refill chain history."""
+        try:
+            from datetime import datetime, timedelta
+            chain_sorted = sorted(chain, key=lambda x: x[0], reverse=True)
+            
+            dlg = QDialog(self)
+            dlg.setWindowTitle(f"Refill History — ORD-{str(base_id).zfill(3)}  ({len(chain_sorted)} fills)")
+            dlg.setMinimumWidth(900)
+            dlg.setMinimumHeight(300)
+            # Start at 90% of parent window size for near-fullscreen feel
+            try:
+                pw = self.width()
+                ph = self.height()
+                dlg.resize(int(pw * 0.92), int(ph * 0.55))
+            except Exception:
+                dlg.resize(1200, 500)
+            dlg.setSizeGripEnabled(True)
+            
+            layout = QVBoxLayout(dlg)
+            layout.setContentsMargins(12, 12, 12, 12)
+            layout.setSpacing(8)
+            
+            header = QLabel(f"Refill Chain — {len(chain_sorted)} orders  •  Double-click any row to open Order Editor")
+            header.setStyleSheet("font-size: 13px; font-weight: bold; color: #0d6efd;")
+            layout.addWidget(header)
+            
+            # Full column set matching the main orders table
+            col_headers = [
+                "Order #", "Patient", "DOB", "HCPCS", "Description",
+                "Qty", "Refills", "Days", "Order Date",
+                "Refill Due", "Del/PU Date", "Status", "Tracking #",
+                "Notes", "Paid", "Paid Date"
+            ]
+            tbl = QTableWidget()
+            tbl.setColumnCount(len(col_headers))
+            tbl.setHorizontalHeaderLabels(col_headers)
+            tbl.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+            tbl.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+            tbl.setAlternatingRowColors(True)
+            tbl.verticalHeader().setVisible(False)
+            tbl.horizontalHeader().setStretchLastSection(True)
+            
+            conn = sqlite3.connect(self.orders_db_path)
+            cur = conn.cursor()
+            
+            # Map row → order_id for double-click editing
+            row_order_map = {}
+            
+            for refill_no, oid in chain_sorted:
+                cur.execute(
+                    """SELECT o.order_date, o.order_status, o.refill_number,
+                              o.patient_last_name, o.patient_first_name, o.patient_dob,
+                              o.delivery_date, o.pickup_date, o.tracking_number,
+                              o.notes, o.paid, o.paid_date, o.is_pickup,
+                              i.hcpcs_code, i.description, i.qty, i.refills, i.day_supply
+                       FROM orders o
+                       LEFT JOIN order_items i ON i.order_id = o.id
+                       WHERE o.id = ?
+                       ORDER BY i.id ASC""",
+                    (oid,),
+                )
+                rows = cur.fetchall()
+                if not rows:
+                    continue
+                
+                for i, row_data in enumerate(rows):
+                    (odate, ostatus, rno, lname, fname, dob,
+                     del_date, pu_date, tracking, notes_val,
+                     paid_val, paid_date_val, is_pu,
+                     hcpcs, desc, qty, refills_val, days) = row_data
+                    
+                    r = tbl.rowCount()
+                    tbl.insertRow(r)
+                    row_order_map[r] = oid
+                    
+                    # Col 0: Order #
+                    if i == 0:
+                        try:
+                            order_num = self.format_order_number(oid)
+                        except Exception:
+                            order_num = f"ORD-{str(base_id).zfill(3)}" + (f"-R{rno}" if rno else "")
+                        tbl.setItem(r, 0, QTableWidgetItem(order_num))
+                    else:
+                        tbl.setItem(r, 0, QTableWidgetItem("  ↳"))
+                    
+                    # Col 1: Patient (first row only)
+                    pname = f"{lname}, {fname}" if lname and fname else ""
+                    tbl.setItem(r, 1, QTableWidgetItem(pname if i == 0 else ""))
+                    
+                    # Col 2: DOB
+                    dob_disp = ""
+                    if i == 0 and dob:
+                        try:
+                            dob_disp = self.format_date_display(dob)
+                        except Exception:
+                            dob_disp = dob or ""
+                    tbl.setItem(r, 2, QTableWidgetItem(dob_disp))
+                    
+                    # Col 3: HCPCS
+                    hcpcs_clean = (hcpcs or "").split("-")[0].strip() if hcpcs else ""
+                    tbl.setItem(r, 3, QTableWidgetItem(hcpcs_clean))
+                    
+                    # Col 4: Description
+                    tbl.setItem(r, 4, QTableWidgetItem(desc or ""))
+                    
+                    # Col 5: Qty
+                    tbl.setItem(r, 5, QTableWidgetItem(str(qty) if qty else ""))
+                    
+                    # Col 6: Refills
+                    tbl.setItem(r, 6, QTableWidgetItem(str(refills_val) if refills_val else "0"))
+                    
+                    # Col 7: Days
+                    tbl.setItem(r, 7, QTableWidgetItem(str(days) if days else ""))
+                    
+                    # Col 8: Order Date (first row only)
+                    od_disp = ""
+                    if i == 0 and odate:
+                        try:
+                            od_disp = self.format_date_display(odate)
+                        except Exception:
+                            od_disp = odate or ""
+                    tbl.setItem(r, 8, QTableWidgetItem(od_disp))
+                    
+                    # Col 9: Refill Due Date
+                    due_text = ""
+                    if i == 0 and days and odate:
+                        try:
+                            base_dt = None
+                            for fmt in ("%Y-%m-%d", "%m/%d/%Y", "%Y/%m/%d"):
+                                try:
+                                    base_dt = datetime.strptime(str(odate).split(" ")[0], fmt)
+                                    break
+                                except Exception:
+                                    continue
+                            if base_dt:
+                                due_dt = base_dt + timedelta(days=int(float(days)))
+                                due_text = due_dt.strftime("%m/%d/%Y")
+                        except Exception:
+                            pass
+                    tbl.setItem(r, 9, QTableWidgetItem(due_text))
+                    
+                    # Col 10: Del/PU Date (first row only)
+                    dp_disp = ""
+                    if i == 0:
+                        dp_raw = pu_date or del_date or ""
+                        if dp_raw:
+                            try:
+                                dp_disp = self.format_date_display(dp_raw)
+                            except Exception:
+                                dp_disp = dp_raw
+                    tbl.setItem(r, 10, QTableWidgetItem(dp_disp))
+                    
+                    # Col 11: Status (first row only)
+                    if i == 0:
+                        st_item = QTableWidgetItem((ostatus or "Pending").upper())
+                        st_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                        tbl.setItem(r, 11, st_item)
+                    else:
+                        tbl.setItem(r, 11, QTableWidgetItem(""))
+                    
+                    # Col 12: Tracking # (first row only)
+                    tbl.setItem(r, 12, QTableWidgetItem((tracking or "") if i == 0 else ""))
+                    
+                    # Col 13: Notes (first row only)
+                    tbl.setItem(r, 13, QTableWidgetItem((notes_val or "") if i == 0 else ""))
+                    
+                    # Col 14: Paid (first row only)
+                    if i == 0:
+                        tbl.setItem(r, 14, QTableWidgetItem("Yes" if paid_val else "No"))
+                    else:
+                        tbl.setItem(r, 14, QTableWidgetItem(""))
+                    
+                    # Col 15: Paid Date (first row only)
+                    pd_disp = ""
+                    if i == 0 and paid_date_val:
+                        try:
+                            pd_disp = self.format_date_display(paid_date_val)
+                        except Exception:
+                            pd_disp = paid_date_val or ""
+                    tbl.setItem(r, 15, QTableWidgetItem(pd_disp))
+                    
+                    # Highlight the latest refill row (bold + light blue bg)
+                    if refill_no == chain_sorted[0][0]:
+                        for c in range(len(col_headers)):
+                            it = tbl.item(r, c)
+                            if it:
+                                it.setBackground(QColor(13, 110, 253, 30))
+                                font = it.font()
+                                font.setBold(True)
+                                it.setFont(font)
+            
+            conn.close()
+            
+            tbl.resizeColumnsToContents()
+            layout.addWidget(tbl)
+            
+            # Double-click to open Order Editor
+            main_self = self
+            def on_dbl_click(index):
+                r = index.row()
+                oid = row_order_map.get(r)
+                if oid:
+                    dlg.accept()
+                    main_self.open_order_editor(oid)
+            tbl.doubleClicked.connect(on_dbl_click)
+            
+            note = QLabel("Highlighted = current (latest) fill  •  Double-click any row to open its Order Editor")
+            note.setStyleSheet("color: #6c757d; font-size: 11px; font-style: italic;")
+            layout.addWidget(note)
+            
+            # Buttons
+            btn_layout = QHBoxLayout()
+            btn_layout.addStretch()
+            
+            edit_btn = QPushButton("Edit Selected Order")
+            edit_btn.setFixedWidth(160)
+            def edit_selected():
+                sel = tbl.currentRow()
+                oid = row_order_map.get(sel)
+                if oid:
+                    dlg.accept()
+                    main_self.open_order_editor(oid)
+                else:
+                    QMessageBox.information(dlg, "No Selection", "Select a row first.")
+            edit_btn.clicked.connect(edit_selected)
+            btn_layout.addWidget(edit_btn)
+            
+            close_btn = QPushButton("Close")
+            close_btn.setFixedWidth(100)
+            close_btn.clicked.connect(dlg.accept)
+            btn_layout.addWidget(close_btn)
+            layout.addLayout(btn_layout)
+            
+            dlg.exec()
+        except Exception as e:
+            print(f"Refill history popup error: {e}")
+
     def handle_cell_click(self, row, col):
         """Handle inline interactions for specific columns.
 
+        - 0:  Order # — show refill history popup
         - 14: Paid — single-click toggles between Yes/No (fast UX)
         - 10: Del/PU Date — open date picker
         - 15: Paid Date — open date picker
         """
+        # Show refill history popup when clicking Order # column on a chain order
+        if col == 0:
+            try:
+                item = self.orders_table.item(row, 0)
+                if item:
+                    data = item.data(Qt.ItemDataRole.UserRole)
+                    if data:
+                        order_id, idx = data
+                        base_id = getattr(self, '_order_to_base', {}).get(order_id)
+                        if base_id is not None:
+                            chain = getattr(self, '_base_to_orders', {}).get(base_id, [])
+                            if len(chain) > 1 and idx == 0:
+                                self._show_refill_history_popup(base_id, chain)
+                                return
+            except Exception as e:
+                print(f"Refill chain popup error: {e}")
+        
         # Fast toggle for Paid column
         if col == 14:
             try:
@@ -35600,27 +37505,24 @@ class PDFViewer(QMainWindow):
             row = cursor.fetchone()
             if row:
                 if has_phone:
-                    self.first_name_input.setText(row[0] or "")
-                    self.last_name_input.setText(row[1] or "")
-                    self.dob_input.setText(row[2] or "")
-                    if hasattr(self, 'phone_input'):
-                        self.phone_input.setText(row[3] or "")
-                    self.notes_history.setText(row[4] or "")
+                    if hasattr(self, 'first_name_input'): self.first_name_input.setText(row[0] or "")
+                    if hasattr(self, 'last_name_input'): self.last_name_input.setText(row[1] or "")
+                    if hasattr(self, 'dob_input'): self.dob_input.setText(row[2] or "")
+                    if hasattr(self, 'phone_input'): self.phone_input.setText(row[3] or "")
+                    if hasattr(self, 'notes_history'): self.notes_history.setText(row[4] or "")
                 else:
-                    self.first_name_input.setText(row[0] or "")
-                    self.last_name_input.setText(row[1] or "")
-                    self.dob_input.setText(row[2] or "")
-                    if hasattr(self, 'phone_input'):
-                        self.phone_input.clear()
-                    self.notes_history.setText(row[3] or "")
+                    if hasattr(self, 'first_name_input'): self.first_name_input.setText(row[0] or "")
+                    if hasattr(self, 'last_name_input'): self.last_name_input.setText(row[1] or "")
+                    if hasattr(self, 'dob_input'): self.dob_input.setText(row[2] or "")
+                    if hasattr(self, 'phone_input'): self.phone_input.clear()
+                    if hasattr(self, 'notes_history'): self.notes_history.setText(row[3] or "")
             else:
                 # Clear fields if no data found
-                self.first_name_input.clear()
-                self.last_name_input.clear()
-                self.dob_input.clear()
-                if hasattr(self, 'phone_input'):
-                    self.phone_input.clear()
-                self.notes_history.clear()
+                if hasattr(self, 'first_name_input'): self.first_name_input.clear()
+                if hasattr(self, 'last_name_input'): self.last_name_input.clear()
+                if hasattr(self, 'dob_input'): self.dob_input.clear()
+                if hasattr(self, 'phone_input'): self.phone_input.clear()
+                if hasattr(self, 'notes_history'): self.notes_history.clear()
             conn.close()
         except Exception as e:
             print(f"Error loading data for {clean_filename}: {e}")
@@ -36583,11 +38485,11 @@ class TaskDialog(QDialog):
             conn = sqlite3.connect(self.database_file)
             cursor = conn.cursor()
             
-            first_name = self.first_name_input.text()
-            last_name = self.last_name_input.text()
-            dob = self.dob_input.text()
+            first_name = self.first_name_input.text() if hasattr(self, 'first_name_input') else ''
+            last_name = self.last_name_input.text() if hasattr(self, 'last_name_input') else ''
+            dob = self.dob_input.text() if hasattr(self, 'dob_input') else ''
             phone = self.phone_input.text() if hasattr(self, 'phone_input') else ''
-            notes = self.notes_history.toPlainText()
+            notes = self.notes_history.toPlainText() if hasattr(self, 'notes_history') else ''
             
             # Check if phone column exists, add it if not
             cursor.execute("PRAGMA table_info(documents)")
@@ -37079,6 +38981,8 @@ class FeeScheduleDialog(QDialog):
                                         except Exception:
                                             n = 0
                                         cursor.execute("UPDATE order_items SET refills = ? WHERE id = ?", (str(n + 1), it_id))
+                                    # Unlock parent and clear refill_completed so it can be refilled again
+                                    cursor.execute("UPDATE orders SET refill_completed = 0, refill_completed_at = NULL, is_locked = 0 WHERE id = ?", (prev_id,))
                                     conn.commit()
                             # Proceed to delete items and main order
                             cursor.execute("DELETE FROM order_items WHERE order_id = ?", (order_id_val,))
@@ -37770,6 +39674,33 @@ class FeeScheduleDialog(QDialog):
                 (last_name, first_name, dob),
             )
             orders = cur.fetchall()
+
+            # Fallback: if no orders found (stale refill_completed flags), show ALL orders
+            if not orders:
+                cur.execute(
+                    """
+                    SELECT id, rx_date, order_status, COALESCE(refill_number,0)
+                    FROM orders
+                    WHERE UPPER(patient_last_name)=UPPER(?) AND UPPER(patient_first_name)=UPPER(?) AND COALESCE(patient_dob,'')=COALESCE(?, '')
+                    ORDER BY rx_date ASC, id ASC
+                    """,
+                    (last_name, first_name, dob),
+                )
+                orders = cur.fetchall()
+                # Auto-fix: clear stale refill_completed and is_locked flags
+                for (oid, *_rest) in orders:
+                    cur.execute(
+                        "SELECT COUNT(*) FROM orders WHERE parent_order_id = ?",
+                        (oid,),
+                    )
+                    child_count = cur.fetchone()[0]
+                    if child_count == 0:
+                        cur.execute(
+                            "UPDATE orders SET refill_completed = 0, refill_completed_at = NULL, is_locked = 0 WHERE id = ? AND (COALESCE(refill_completed, 0) = 1 OR COALESCE(is_locked, 0) = 1)",
+                            (oid,),
+                        )
+                conn.commit()
+
             conn.close()
 
             # Build dialog
@@ -39312,10 +41243,23 @@ class FeeScheduleDialog(QDialog):
                 if filename.lower().endswith(".pdf"):
                     pdf_files.append(filename)
             
-            # Sort files alphabetically
-            pdf_files.sort()
+            # Sort based on current sort mode
+            sort_mode = getattr(self, '_file_sort_mode', 'date')
+            if sort_mode == 'name':
+                pdf_files.sort(key=str.lower)
+            else:
+                pdf_files.sort(key=lambda f: os.path.getctime(os.path.join(self.folder_path, f)), reverse=True)
+            
+            # Build link cache to show indicators
+            link_cache = self._build_file_link_cache()
+            
             for filename in pdf_files:
-                self.file_list_widget.addItem(filename)
+                item = QListWidgetItem(filename)
+                item.setData(Qt.ItemDataRole.UserRole, filename)
+                icon = self._file_link_icon(filename, link_cache)
+                if icon:
+                    item.setIcon(icon)
+                self.file_list_widget.addItem(item)
             
             # Refresh filter dropdowns with new file data
             if hasattr(self, 'fax_filter_combo'):
@@ -39339,7 +41283,7 @@ class FeeScheduleDialog(QDialog):
         try:
             # Auto-save data for the previously selected file
             if previous_item is not None:
-                prev_filename = previous_item.text()
+                prev_filename = self._get_file_item_name(previous_item)
                 try:
                     self.save_data(prev_filename)
                     print(f"Auto-saved when switching from: {prev_filename}")
@@ -39349,7 +41293,7 @@ class FeeScheduleDialog(QDialog):
             # DON'T clear - load data from database to keep tags attached to files
             # Load data FIRST before displaying PDF
             if current_item is not None:
-                self.current_file = current_item.text()
+                self.current_file = self._get_file_item_name(current_item)
                 try:
                     self.load_data(self.current_file)  # Load tags first
                 except Exception:
@@ -39368,7 +41312,7 @@ class FeeScheduleDialog(QDialog):
             self.reapply_highlighting()
         except Exception as e:
             try:
-                name = current_item.text() if current_item else "(none)"
+                name = self._get_file_item_name(current_item) if current_item else "(none)"
                 self.statusBar().showMessage(f"Error opening {name}: {e}", 5000)
             except Exception:
                 pass
@@ -39423,19 +41367,17 @@ class FeeScheduleDialog(QDialog):
         row = cursor.fetchone()
         if row:
             if has_phone:
-                self.first_name_input.setText(row[0] or "")
-                self.last_name_input.setText(row[1] or "")
-                self.dob_input.setText(row[2] or "")
-                if hasattr(self, 'phone_input'):
-                    self.phone_input.setText(row[3] or "")
-                self.notes_history.setText(row[4] or "")
+                if hasattr(self, 'first_name_input'): self.first_name_input.setText(row[0] or "")
+                if hasattr(self, 'last_name_input'): self.last_name_input.setText(row[1] or "")
+                if hasattr(self, 'dob_input'): self.dob_input.setText(row[2] or "")
+                if hasattr(self, 'phone_input'): self.phone_input.setText(row[3] or "")
+                if hasattr(self, 'notes_history'): self.notes_history.setText(row[4] or "")
             else:
-                self.first_name_input.setText(row[0] or "")
-                self.last_name_input.setText(row[1] or "")
-                self.dob_input.setText(row[2] or "")
-                if hasattr(self, 'phone_input'):
-                    self.phone_input.clear()
-                self.notes_history.setText(row[3] or "")
+                if hasattr(self, 'first_name_input'): self.first_name_input.setText(row[0] or "")
+                if hasattr(self, 'last_name_input'): self.last_name_input.setText(row[1] or "")
+                if hasattr(self, 'dob_input'): self.dob_input.setText(row[2] or "")
+                if hasattr(self, 'phone_input'): self.phone_input.clear()
+                if hasattr(self, 'notes_history'): self.notes_history.setText(row[3] or "")
         conn.close()
 
     def save_data(self, filename):
@@ -39464,11 +41406,11 @@ class FeeScheduleDialog(QDialog):
             INSERT OR REPLACE INTO documents (filename, first_name, last_name, dob, phone, notes)
             VALUES (?, ?, ?, ?, ?, ?)
             """, (clean_filename, 
-                  self.first_name_input.text().strip(), 
-                  self.last_name_input.text().strip(), 
-                  self.dob_input.text().strip(),
+                  self.first_name_input.text().strip() if hasattr(self, 'first_name_input') else '',
+                  self.last_name_input.text().strip() if hasattr(self, 'last_name_input') else '',
+                  self.dob_input.text().strip() if hasattr(self, 'dob_input') else '',
                   phone,
-                  self.notes_history.toPlainText()))
+                  self.notes_history.toPlainText() if hasattr(self, 'notes_history') else ''))
             conn.commit()
             conn.close()
             print(f"Auto-saved data for: {filename}")  # Debug message
@@ -39478,6 +41420,8 @@ class FeeScheduleDialog(QDialog):
 
     def add_note(self):
         """Adds a new timestamped note to the notes history."""
+        if not hasattr(self, 'new_note_input') or not hasattr(self, 'notes_history'):
+            return
         new_note_text = self.new_note_input.text().strip()
         if new_note_text:
             # Standardize timestamp display format

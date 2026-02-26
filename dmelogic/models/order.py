@@ -271,6 +271,7 @@ class Order:
     # Notes and directions
     notes: str = ""
     doctor_directions: str = ""
+    epaces_alert: str = ""  # Popup note shown when EPACES helper opens
     
     # Order items (aggregate)
     items: List[OrderItem] = field(default_factory=list)
