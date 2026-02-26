@@ -52,3 +52,5 @@ ocr_failures.log
 # OS files
 Thumbs.db
 .DS_Store
+
+tesseract_portable/
