@@ -130,7 +130,7 @@ class OrderVolumeAnalyticsReport(QDialog):
             ["Status", "Count", "% of Total", "Revenue"])
         if HAS_MATPLOTLIB:
             splitter2 = QSplitter(Qt.Orientation.Horizontal)
-            self.status_fig = Figure(figsize=(4, 3), dpi=100)
+            self.status_fig = Figure(figsize=(6, 4), dpi=100)
             self.status_canvas = FigureCanvas(self.status_fig)
             splitter2.addWidget(self.status_canvas)
             splitter2.addWidget(self.status_table)
@@ -162,8 +162,12 @@ class OrderVolumeAnalyticsReport(QDialog):
         # Tab 4 – Insurance Mix
         ins_tab = QWidget()
         ins_lo = QVBoxLayout(ins_tab)
+        ins_hint = QLabel("💡 Double-click an insurance row to see its orders and fix errors")
+        ins_hint.setStyleSheet("color: #666; font-style: italic; padding: 4px;")
+        ins_lo.addWidget(ins_hint)
         self.ins_table = self._make_table(
             ["Insurance", "# Orders", "% of Total", "Revenue"])
+        self.ins_table.doubleClicked.connect(self._on_insurance_double_click)
         ins_lo.addWidget(self.ins_table)
         tabs.addTab(ins_tab, "Insurance Mix")
 
@@ -402,12 +406,33 @@ class OrderVolumeAnalyticsReport(QDialog):
             labels = list(counts.keys())
             sizes = list(counts.values())
             colors = ["#42a5f5", "#66bb6a", "#ffa726", "#ef5350",
-                      "#ab47bc", "#26c6da", "#8d6e63", "#78909c"]
-            ax.pie(sizes, labels=labels,
-                   colors=colors[:len(labels)],
-                   autopct="%1.0f%%", startangle=90, textprops={"fontsize": 8})
-            ax.set_title("Status Distribution", fontsize=10)
-            self.status_fig.tight_layout()
+                      "#ab47bc", "#26c6da", "#8d6e63", "#78909c",
+                      "#ec407a", "#7e57c2"]
+
+            # Only show percentage label on slices >= 5%
+            total_size = sum(sizes)
+
+            def autopct_func(pct):
+                return f"{pct:.0f}%" if pct >= 5 else ""
+
+            wedges, texts, autotexts = ax.pie(
+                sizes,
+                colors=colors[:len(labels)],
+                autopct=autopct_func,
+                startangle=90,
+                pctdistance=0.75,
+                textprops={"fontsize": 8},
+            )
+            # Hide on-chart labels — use legend instead
+            for t in texts:
+                t.set_text("")
+            ax.legend(
+                wedges, [f"{l} ({s})" for l, s in zip(labels, sizes)],
+                loc="center left", bbox_to_anchor=(1.0, 0.5),
+                fontsize=8, framealpha=0.9,
+            )
+            ax.set_title("Status Distribution", fontsize=10, fontweight="bold")
+            self.status_fig.tight_layout(rect=[0, 0, 0.75, 1])
             self.status_canvas.draw()
 
     # ------------------------------------------------------------------
@@ -482,6 +507,28 @@ class OrderVolumeAnalyticsReport(QDialog):
                 ins, str(cnt), f"{pct:.1f}%", f"${rev or 0:,.2f}"
             ]):
                 self.ins_table.setItem(row, col, QTableWidgetItem(v))
+
+    def _on_insurance_double_click(self, index):
+        """Open drill-down showing all orders for the selected insurance."""
+        row = index.row()
+        ins_item = self.ins_table.item(row, 0)
+        if not ins_item:
+            return
+        insurance_name = ins_item.text()
+        dlg = InsuranceDrillDown(
+            self, insurance_name=insurance_name,
+            orders_db_path=str(self.orders_db_path)
+        )
+        if dlg.exec() == QDialog.DialogCode.Accepted:
+            # Refresh insurance tab after edits
+            total = 0
+            try:
+                conn = sqlite3.connect(str(self.orders_db_path))
+                total = conn.execute("SELECT COUNT(*) FROM orders").fetchone()[0]
+                conn.close()
+            except Exception:
+                pass
+            self._fill_insurance(total or 287)
 
     # ------------------------------------------------------------------
     # Export
@@ -589,3 +636,295 @@ class OrderVolumeAnalyticsReport(QDialog):
                                     f"Exported to:\n{fn}")
         except Exception as exc:
             QMessageBox.critical(self, "Export Failed", str(exc))
+
+
+# ======================================================================
+# Insurance Drill-Down Dialog
+# ======================================================================
+class InsuranceDrillDown(QDialog):
+    """Shows all orders for a given insurance with ability to reassign."""
+
+    def __init__(self, parent=None, *, insurance_name: str = "",
+                 orders_db_path: str = ""):
+        super().__init__(parent)
+        self.insurance_name = insurance_name
+        self.orders_db_path = orders_db_path
+        self._changes_made = False
+
+        self.setWindowTitle(f"Orders — {insurance_name}")
+        self.setModal(True)
+        self.resize(1200, 650)
+        self.setMinimumSize(900, 400)
+
+        self._setup_ui()
+        self._load_orders()
+
+    def _setup_ui(self):
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(16, 16, 16, 16)
+        layout.setSpacing(10)
+
+        # Header
+        hdr = QLabel(f"Orders with insurance: {self.insurance_name}")
+        hf = QFont("Segoe UI", 13)
+        hf.setBold(True)
+        hdr.setFont(hf)
+        hdr.setStyleSheet("color: #1565c0;")
+        layout.addWidget(hdr)
+
+        # Bulk-change row
+        fix_row = QHBoxLayout()
+        fix_row.addWidget(QLabel("Change selected orders' insurance to:"))
+        self.new_insurance_input = QComboBox()
+        self.new_insurance_input.setEditable(True)
+        self.new_insurance_input.setMinimumWidth(250)
+        self.new_insurance_input.setStyleSheet("padding: 4px; font-size: 10pt;")
+        fix_row.addWidget(self.new_insurance_input)
+
+        apply_btn = QPushButton("Apply to Selected")
+        apply_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #e65100; color: white; border: none;
+                padding: 6px 16px; border-radius: 4px; font-weight: 600;
+            }
+            QPushButton:hover { background-color: #bf360c; }
+        """)
+        apply_btn.clicked.connect(self._apply_change_selected)
+        fix_row.addWidget(apply_btn)
+
+        apply_all_btn = QPushButton("Apply to ALL Listed")
+        apply_all_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #c62828; color: white; border: none;
+                padding: 6px 16px; border-radius: 4px; font-weight: 600;
+            }
+            QPushButton:hover { background-color: #b71c1c; }
+        """)
+        apply_all_btn.clicked.connect(self._apply_change_all)
+        fix_row.addWidget(apply_all_btn)
+
+        fix_row.addStretch()
+        layout.addLayout(fix_row)
+
+        # Orders table
+        self.table = QTableWidget()
+        self.table.setAlternatingRowColors(True)
+        self.table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self.table.setSelectionMode(QTableWidget.SelectionMode.MultiSelection)
+        cols = ["Order ID", "Order Date", "Patient", "DOB", "Phone",
+                "Insurance", "Insurance ID", "Status", "Items", "Total"]
+        self.table.setColumnCount(len(cols))
+        self.table.setHorizontalHeaderLabels(cols)
+        self.table.setStyleSheet("""
+            QTableWidget { gridline-color: #e0e0e0; background: white;
+                           alternate-background-color: #f8f9fa; }
+            QTableWidget::item { padding: 4px; }
+            QHeaderView::section {
+                background: #1565c0; color: white;
+                padding: 6px; font-weight: 600; border: none;
+            }
+        """)
+        self.table.verticalHeader().setVisible(False)
+        hdr_view = self.table.horizontalHeader()
+        hdr_view.setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
+        hdr_view.setStretchLastSection(True)
+        layout.addWidget(self.table, 1)
+
+        # Status bar
+        self.status_label = QLabel("")
+        self.status_label.setStyleSheet(
+            "background: #e8f4f8; padding: 6px; border-radius: 3px; font-size: 10pt;")
+        layout.addWidget(self.status_label)
+
+        # Buttons
+        btn_row = QHBoxLayout()
+        btn_row.addStretch()
+        close_btn = QPushButton("Close")
+        close_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #1976d2; color: white; border: none;
+                padding: 8px 24px; border-radius: 4px; font-weight: 600;
+            }
+            QPushButton:hover { background-color: #1565c0; }
+        """)
+        close_btn.clicked.connect(self._on_close)
+        btn_row.addWidget(close_btn)
+        layout.addLayout(btn_row)
+
+    def _load_orders(self):
+        """Load orders matching the insurance name."""
+        self.table.setRowCount(0)
+        try:
+            conn = sqlite3.connect(self.orders_db_path)
+            conn.row_factory = sqlite3.Row
+
+            # Match: exact, empty/null for "Unknown"
+            if self.insurance_name in ("Unknown", "(None)", ""):
+                where = "(o.primary_insurance IS NULL OR o.primary_insurance = '')"
+                params = ()
+            else:
+                where = "o.primary_insurance = ?"
+                params = (self.insurance_name,)
+
+            sql = f"""
+                SELECT
+                    o.id,
+                    COALESCE(o.order_date, o.created_date, '')      AS order_date,
+                    COALESCE(o.patient_last_name,'') || ', '
+                        || COALESCE(o.patient_first_name,'')         AS patient_name,
+                    COALESCE(o.patient_dob, '')                      AS dob,
+                    COALESCE(o.patient_phone, '')                     AS phone,
+                    COALESCE(o.primary_insurance,'')                  AS insurance,
+                    COALESCE(o.primary_insurance_id,'')               AS insurance_id,
+                    COALESCE(o.order_status,'')                       AS status,
+                    GROUP_CONCAT(
+                        COALESCE(oi.hcpcs_code,'') || ' ' ||
+                        COALESCE(oi.description,''), ' | ')          AS items,
+                    SUM(CAST(COALESCE(oi.total,'0') AS REAL))        AS total_value
+                FROM orders o
+                LEFT JOIN order_items oi ON oi.order_id = o.id
+                WHERE {where}
+                GROUP BY o.id
+                ORDER BY o.order_date DESC
+            """
+            rows = conn.execute(sql, params).fetchall()
+
+            # Also grab list of all distinct insurances for the combo
+            all_ins = conn.execute(
+                "SELECT DISTINCT primary_insurance FROM orders "
+                "WHERE primary_insurance IS NOT NULL AND primary_insurance != '' "
+                "ORDER BY primary_insurance"
+            ).fetchall()
+            conn.close()
+
+            # Populate the combo with known insurance names
+            self.new_insurance_input.clear()
+            seen = set()
+            for r in all_ins:
+                name = r[0].strip()
+                upper = name.upper()
+                if upper not in seen and name:
+                    self.new_insurance_input.addItem(name)
+                    seen.add(upper)
+
+            # Populate table
+            for r in rows:
+                row_idx = self.table.rowCount()
+                self.table.insertRow(row_idx)
+                items_text = (r["items"] or "").strip()
+                if len(items_text) > 60:
+                    items_text = items_text[:57] + "..."
+                vals = [
+                    f"ORD-{r['id']}",
+                    r["order_date"],
+                    r["patient_name"],
+                    r["dob"],
+                    r["phone"],
+                    r["insurance"],
+                    r["insurance_id"],
+                    r["status"],
+                    items_text,
+                    f"${r['total_value'] or 0:,.2f}",
+                ]
+                for col, v in enumerate(vals):
+                    item = QTableWidgetItem(str(v))
+                    if col == 9:  # Total - right align
+                        item.setTextAlignment(
+                            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+                    item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+                    self.table.setItem(row_idx, col, item)
+
+            self.status_label.setText(
+                f"{len(rows)} orders with insurance \"{self.insurance_name}\"")
+
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to load orders:\n{e}")
+            import traceback
+            traceback.print_exc()
+
+    def _get_selected_order_ids(self) -> list:
+        """Get order IDs from selected rows."""
+        ids = []
+        for idx in self.table.selectionModel().selectedRows():
+            item = self.table.item(idx.row(), 0)
+            if item:
+                oid = item.text().replace("ORD-", "")
+                try:
+                    ids.append(int(oid))
+                except ValueError:
+                    pass
+        return ids
+
+    def _apply_change_selected(self):
+        """Change insurance for selected orders only."""
+        new_ins = self.new_insurance_input.currentText().strip()
+        if not new_ins:
+            QMessageBox.warning(self, "No Insurance", "Enter or select an insurance name.")
+            return
+        ids = self._get_selected_order_ids()
+        if not ids:
+            QMessageBox.warning(self, "No Selection", "Select one or more order rows first.")
+            return
+        self._update_insurance(ids, new_ins)
+
+    def _apply_change_all(self):
+        """Change insurance for ALL listed orders."""
+        new_ins = self.new_insurance_input.currentText().strip()
+        if not new_ins:
+            QMessageBox.warning(self, "No Insurance", "Enter or select an insurance name.")
+            return
+        count = self.table.rowCount()
+        if count == 0:
+            return
+        reply = QMessageBox.question(
+            self, "Confirm Bulk Update",
+            f"Change insurance for ALL {count} orders from\n"
+            f"\"{self.insurance_name}\" → \"{new_ins}\"?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+        ids = []
+        for r in range(count):
+            item = self.table.item(r, 0)
+            if item:
+                oid = item.text().replace("ORD-", "")
+                try:
+                    ids.append(int(oid))
+                except ValueError:
+                    pass
+        self._update_insurance(ids, new_ins)
+
+    def _update_insurance(self, order_ids: list, new_insurance: str):
+        """Update primary_insurance in orders.db for the given IDs."""
+        if not order_ids:
+            return
+        try:
+            conn = sqlite3.connect(self.orders_db_path)
+            placeholders = ",".join("?" for _ in order_ids)
+            conn.execute(
+                f"UPDATE orders SET primary_insurance = ? WHERE id IN ({placeholders})",
+                [new_insurance] + order_ids
+            )
+            conn.commit()
+            conn.close()
+            self._changes_made = True
+
+            QMessageBox.information(
+                self, "Updated",
+                f"Updated {len(order_ids)} order(s) to \"{new_insurance}\"."
+            )
+            # Reload the view
+            self._load_orders()
+
+        except Exception as e:
+            QMessageBox.critical(self, "Update Failed", f"Error:\n{e}")
+            import traceback
+            traceback.print_exc()
+
+    def _on_close(self):
+        if self._changes_made:
+            self.accept()  # Signal parent to refresh
+        else:
+            self.reject()

@@ -215,10 +215,18 @@ QDateEdit, QTimeEdit, QDateTimeEdit {
 }
 QDateEdit:focus, QTimeEdit:focus, QDateTimeEdit:focus { border-color: #3b82f6; background-color: #111620; }
 QDateEdit::drop-down, QTimeEdit::drop-down, QDateTimeEdit::drop-down { border: none; width: 28px; subcontrol-origin: padding; subcontrol-position: right center; }
-QCalendarWidget { background-color: #111620; color: #e2e8f0; }
-QCalendarWidget QTableView { background-color: #111620; alternate-background-color: #161d2c; selection-background-color: #3b82f6; }
-QCalendarWidget QToolButton { color: #e2e8f0; background-color: transparent; border: none; padding: 4px 8px; border-radius: 4px; }
+QCalendarWidget { background-color: #111620; color: #e2e8f0; min-width: 300px; min-height: 240px; border: 1px solid #253550; border-radius: 6px; }
+QCalendarWidget QWidget#qt_calendar_navigationbar { background-color: #161d2c; border-bottom: 1px solid #253550; min-height: 36px; padding: 2px 6px; }
+QCalendarWidget QTableView { background-color: #111620; alternate-background-color: #161d2c; selection-background-color: #3b82f6; font-size: 12px; gridline-color: #1c2538; }
+QCalendarWidget QAbstractItemView::item { padding: 4px; min-width: 32px; min-height: 28px; }
+QCalendarWidget QAbstractItemView::item:hover { background-color: #1c2538; border-radius: 4px; }
+QCalendarWidget QAbstractItemView::item:selected { background-color: #3b82f6; color: white; border-radius: 4px; }
+QCalendarWidget QToolButton { color: #e2e8f0; background-color: transparent; border: none; padding: 6px 10px; border-radius: 4px; font-size: 13px; font-weight: 600; }
 QCalendarWidget QToolButton:hover { background-color: #1c2538; }
+QCalendarWidget QMenu { background: #111620; border: 1px solid #253550; border-radius: 4px; padding: 4px; }
+QCalendarWidget QMenu::item { padding: 4px 20px; }
+QCalendarWidget QMenu::item:selected { background: #1c2538; }
+QCalendarWidget QSpinBox { border: 1px solid #253550; border-radius: 3px; padding: 2px 4px; background: #111620; color: #e2e8f0; font-size: 13px; min-width: 60px; }
 
 
 /* ============= CHECKBOXES / RADIO ============= */

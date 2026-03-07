@@ -76,7 +76,7 @@ class CommandBar(QDialog):
         )
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, False)
         self.setModal(True)
-        self.resize(560, 420)
+        self.resize(620, 460)
 
         self._debounce_timer = QTimer()
         self._debounce_timer.setSingleShot(True)
@@ -111,34 +111,36 @@ class CommandBar(QDialog):
         search_row = QHBoxLayout()
         search_row.setSpacing(8)
 
-        icon_label = QLabel("🔍")
-        icon_label.setFixedWidth(24)
+        icon_label = QLabel("\U0001f50d")
+        icon_label.setStyleSheet("font-size: 18px;")
+        icon_label.setFixedWidth(28)
         search_row.addWidget(icon_label)
 
         self.search_input = QLineEdit()
-        self.search_input.setPlaceholderText("Search inventory, orders, patients, or type a command…")
-        self.search_input.setFont(QFont("Segoe UI", 12))
+        self.search_input.setPlaceholderText("Search patients, orders, inventory, or type a command\u2026")
+        self.search_input.setFont(QFont("Segoe UI", 13))
         self.search_input.setStyleSheet("""
             QLineEdit {
                 background: transparent;
                 border: none;
                 color: #CDD6F4;
                 padding: 6px 0px;
-                font-size: 13px;
+                font-size: 14px;
             }
         """)
         self.search_input.textChanged.connect(self._on_text_changed)
         self.search_input.installEventFilter(self)
         search_row.addWidget(self.search_input, 1)
 
-        shortcut_label = QLabel("ESC")
+        shortcut_label = QLabel("Ctrl+K")
         shortcut_label.setStyleSheet("""
             QLabel {
                 background: #313244;
                 color: #6C7086;
                 border-radius: 4px;
-                padding: 2px 6px;
+                padding: 2px 8px;
                 font-size: 10px;
+                font-family: Consolas;
             }
         """)
         search_row.addWidget(shortcut_label)
@@ -159,20 +161,24 @@ class CommandBar(QDialog):
                 border: none;
                 color: #CDD6F4;
                 outline: none;
+                font-size: 11pt;
             }
             QListWidget::item {
-                padding: 8px 10px;
+                padding: 10px 12px;
                 border-radius: 6px;
                 margin: 1px 0px;
+                color: #CDD6F4;
             }
             QListWidget::item:selected {
                 background-color: #313244;
+                color: #FFFFFF;
             }
             QListWidget::item:hover {
                 background-color: #2A2A3C;
+                color: #FFFFFF;
             }
         """)
-        self.results_list.setFont(QFont("Segoe UI", 10))
+        self.results_list.setFont(QFont("Segoe UI", 11))
         self.results_list.itemActivated.connect(self._on_item_activated)
         self.results_list.itemDoubleClicked.connect(self._on_item_activated)
         clayout.addWidget(self.results_list, 1)
@@ -213,7 +219,7 @@ class CommandBar(QDialog):
         if parent:
             geo = parent.geometry()
             x = geo.x() + (geo.width() - self.width()) // 2
-            y = geo.y() + 80
+            y = geo.y() + int(geo.height() * 0.12)
             self.move(x, y)
 
         self.show()
@@ -235,8 +241,20 @@ class CommandBar(QDialog):
 
     def eventFilter(self, obj, event):
         if obj == self.search_input and hasattr(event, 'key'):
-            if event.key() in (Qt.Key.Key_Down, Qt.Key.Key_Up):
+            key = event.key()
+            if key in (Qt.Key.Key_Down, Qt.Key.Key_Up):
                 self.results_list.setFocus()
+                if key == Qt.Key.Key_Down and self.results_list.count() > 0:
+                    row = self.results_list.currentRow()
+                    self.results_list.setCurrentRow(min(row + 1, self.results_list.count() - 1))
+                elif key == Qt.Key.Key_Up and self.results_list.count() > 0:
+                    row = self.results_list.currentRow()
+                    self.results_list.setCurrentRow(max(row - 1, 0))
+                return True
+            elif key in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+                current = self.results_list.currentItem()
+                if current:
+                    self._on_item_activated(current)
                 return True
         return super().eventFilter(obj, event)
 
@@ -259,14 +277,17 @@ class CommandBar(QDialog):
         # 2) Actions
         results.extend(self._search_actions(query))
 
-        # 3) Inventory
-        results.extend(self._search_inventory(query))
+        # 3) Patients (most common search target)
+        results.extend(self._search_patients(query))
 
         # 4) Orders
         results.extend(self._search_orders(query))
 
-        # 5) Patients
-        results.extend(self._search_patients(query))
+        # 5) Inventory
+        results.extend(self._search_inventory(query))
+
+        # 6) Prescribers
+        results.extend(self._search_prescribers(query))
 
         self._display_results(results)
 
@@ -277,52 +298,87 @@ class CommandBar(QDialog):
 
     def _display_results(self, results: List[CommandBarResult]):
         self.results_list.clear()
-        for r in results[:20]:  # Cap at 20
-            text = f"{r.icon}  {r.title}"
+        if not results:
+            item = QListWidgetItem("    No results found")
+            item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsSelectable)
+            item.setForeground(QColor("#585B70"))
+            self.results_list.addItem(item)
+            return
+
+        last_category = ""
+        for r in results[:25]:  # Cap at 25
+            # Category header
+            if r.category != last_category:
+                last_category = r.category
+                header = QListWidgetItem(f"  {r.category.upper()}")
+                header.setFlags(header.flags() & ~Qt.ItemFlag.ItemIsSelectable)
+                header.setForeground(QColor("#6C7086"))
+                hfont = QFont("Segoe UI", 8)
+                hfont.setBold(True)
+                header.setFont(hfont)
+                self.results_list.addItem(header)
+
+            text = f"  {r.icon}  {r.title}"
             if r.subtitle:
-                text += f"  —  {r.subtitle}"
+                text += f"   \u2014  {r.subtitle}"
 
             item = QListWidgetItem(text)
             item.setData(Qt.ItemDataRole.UserRole, r)
+            item.setForeground(QColor("#CDD6F4"))
             self.results_list.addItem(item)
 
-        if self.results_list.count() > 0:
-            self.results_list.setCurrentRow(0)
+        # Select first selectable item
+        for i in range(self.results_list.count()):
+            itm = self.results_list.item(i)
+            if itm and itm.flags() & Qt.ItemFlag.ItemIsSelectable:
+                self.results_list.setCurrentRow(i)
+                break
 
     # ------------------------------------------------------------------ Sources
 
     def _get_navigation_items(self) -> List[CommandBarResult]:
-        """Tab navigation entries."""
+        """Tab navigation entries matching actual main_tabs."""
         tabs = [
-            ("📊", "Dashboard", "Overview & stats", "dashboard"),
-            ("📋", "Orders", "View and manage orders", "orders"),
-            ("👥", "Patients", "Patient management", "patients"),
-            ("📦", "Inventory", "Inventory items", "inventory"),
-            ("♻️", "Refills", "Refill tracking", "refills"),
+            ("\U0001f4c4", "Document Viewer", "View & index documents"),
+            ("\U0001f465", "Patients", "Patient management"),
+            ("\U0001f3e5", "Prescribers", "Prescriber lookup"),
+            ("\U0001f3e2", "Clinics", "Clinic management"),
+            ("\U0001f4e6", "DME Inventory", "Quick inventory view"),
+            ("\U0001f4cb", "Orders", "View & track orders"),
+            ("\u26a0\ufe0f", "Must Go Out", "Urgent deliveries"),
+            ("\U0001f4e6", "Inventory", "Full inventory management"),
+            ("\U0001f4b3", "Billing", "Billing & claims"),
+            ("\U0001f4ca", "Reports", "Analytics & reports"),
+            ("\u267b\ufe0f", "Process Refills", "Refill processing"),
+            ("\U0001f4c5", "Fee Schedule", "Fee schedule lookup"),
+            ("\U0001f4cb", "Queues", "Work queues"),
+            ("\u2705", "Tasks", "Task management"),
+            ("\U0001f3e5", "ICD-10", "Diagnosis codes"),
         ]
         results = []
-        for icon, name, desc, tab_key in tabs:
+        for icon, name, desc in tabs:
             results.append(CommandBarResult(
                 icon=icon, title=f"Go to {name}", subtitle=desc,
                 category="Navigation",
-                action=lambda k=tab_key: self._navigate_to_tab(k),
+                action=lambda t=name: self._navigate_to_tab(t),
             ))
         return results
 
     def _get_action_items(self) -> List[CommandBarResult]:
         """Quick action entries."""
         actions = [
-            ("🛒", "New Order", "Create a new DME order", "_action_new_order"),
-            ("➕", "Add Inventory Item", "Add a new item to inventory", "_action_add_inventory"),
-            ("➕", "New Patient", "Add a new patient", "_action_new_patient"),
-            ("📝", "Sticky Notes", "Open sticky notes board", "_action_sticky_notes"),
+            ("\U0001f6d2", "New Order", "Create a new DME order", "new_order"),
+            ("\u2795", "Add Patient", "Add a new patient", "new_patient"),
+            ("\u2795", "Add Inventory Item", "Add item to inventory", "add_inventory"),
+            ("\U0001f4dd", "Sticky Notes", "Open sticky notes board", "sticky_notes"),
+            ("\u2699\ufe0f", "Settings", "Open application settings", "settings"),
         ]
         results = []
-        for icon, name, desc, method in actions:
+        for icon, name, desc, key in actions:
             results.append(CommandBarResult(
                 icon=icon, title=name, subtitle=desc,
-                category="Action",
-                action=lambda m=method: self._run_action(m),
+                category="Actions",
+                action=lambda k=key: self._run_action(k),
             ))
         return results
 
@@ -384,27 +440,41 @@ class CommandBar(QDialog):
             cur = conn.cursor()
             cur.execute(
                 """
-                SELECT id, patient_name, order_status, order_date, billing_type
+                SELECT id, patient_last_name, patient_first_name,
+                       order_status, order_date, primary_insurance
                 FROM orders
                 WHERE CAST(id AS TEXT) LIKE ?
-                   OR patient_name LIKE ?
+                   OR patient_last_name LIKE ?
+                   OR patient_first_name LIKE ?
                    OR order_status LIKE ?
+                   OR primary_insurance LIKE ?
                 ORDER BY id DESC
                 LIMIT 8
                 """,
-                (f"%{query}%", f"%{query}%", f"%{query}%"),
+                (f"%{query}%", f"%{query}%", f"%{query}%",
+                 f"%{query}%", f"%{query}%"),
             )
             for row in cur.fetchall():
                 oid = row["id"]
-                name = row["patient_name"] or "Unknown"
+                last = row["patient_last_name"] or ""
+                first = row["patient_first_name"] or ""
+                name = f"{last}, {first}".strip(", ") or "Unknown"
                 status = row["order_status"] or ""
                 odate = row["order_date"] or ""
+                ins = row["primary_insurance"] or ""
+                subtitle_parts = []
+                if status:
+                    subtitle_parts.append(status)
+                if odate:
+                    subtitle_parts.append(odate)
+                if ins:
+                    subtitle_parts.append(ins)
 
                 results.append(CommandBarResult(
-                    icon="📋",
-                    title=f"ORD-{oid:03d} — {name}",
-                    subtitle=f"{status} • {odate}",
-                    category="Order",
+                    icon="\U0001f4cb",
+                    title=f"ORD-{oid:03d} \u2014 {name}",
+                    subtitle=" \u2022 ".join(subtitle_parts),
+                    category="Orders",
                     action=lambda o=oid: self._open_order(o),
                     data=dict(row),
                 ))
@@ -423,31 +493,87 @@ class CommandBar(QDialog):
             cur = conn.cursor()
             cur.execute(
                 """
-                SELECT id, last_name, first_name, dob, phone
+                SELECT id, last_name, first_name, dob, phone,
+                       primary_insurance
                 FROM patients
-                WHERE last_name LIKE ? OR first_name LIKE ? OR phone LIKE ?
+                WHERE last_name LIKE ? OR first_name LIKE ?
+                   OR phone LIKE ? OR dob LIKE ?
                 ORDER BY last_name, first_name
                 LIMIT 8
                 """,
-                (f"%{query}%", f"%{query}%", f"%{query}%"),
+                (f"%{query}%", f"%{query}%", f"%{query}%", f"%{query}%"),
             )
             for row in cur.fetchall():
                 pid = row["id"]
-                name = f"{row['last_name'] or ''}, {row['first_name'] or ''}".strip(", ")
+                last = row["last_name"] or ""
+                first = row["first_name"] or ""
+                name = f"{last}, {first}".strip(", ")
                 dob = row["dob"] or ""
                 phone = row["phone"] or ""
+                ins = row["primary_insurance"] or ""
+                subtitle_parts = []
+                if dob:
+                    subtitle_parts.append(f"DOB: {dob}")
+                if phone:
+                    subtitle_parts.append(phone)
+                if ins:
+                    subtitle_parts.append(ins)
 
                 results.append(CommandBarResult(
-                    icon="👤",
+                    icon="\U0001f464",
                     title=name,
-                    subtitle=f"DOB: {dob} • {phone}",
-                    category="Patient",
-                    action=lambda p=pid: self._navigate_to_patient(p),
+                    subtitle=" \u2022 ".join(subtitle_parts),
+                    category="Patients",
+                    action=lambda p=pid, ln=last: self._navigate_to_patient(p, ln),
                     data=dict(row),
                 ))
             conn.close()
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"Command bar patient search error: {e}")
+        return results
+
+    def _search_prescribers(self, query: str) -> List[CommandBarResult]:
+        """Search prescribers.db for matching prescribers."""
+        results = []
+        try:
+            folder_path = getattr(self.main_window, "folder_path", None)
+            conn = get_connection("prescribers.db", folder_path=folder_path)
+            conn.row_factory = sqlite3.Row
+            cur = conn.cursor()
+            cur.execute(
+                """
+                SELECT id, last_name, first_name, npi_number, specialty
+                FROM prescribers
+                WHERE last_name LIKE ? OR first_name LIKE ?
+                   OR npi_number LIKE ? OR specialty LIKE ?
+                ORDER BY last_name, first_name
+                LIMIT 6
+                """,
+                (f"%{query}%", f"%{query}%", f"%{query}%", f"%{query}%"),
+            )
+            for row in cur.fetchall():
+                last = row["last_name"] or ""
+                first = row["first_name"] or ""
+                name = f"Dr. {first} {last}".strip()
+                npi = row["npi_number"] or ""
+                spec = row["specialty"] or ""
+                subtitle_parts = []
+                if npi:
+                    subtitle_parts.append(f"NPI: {npi}")
+                if spec:
+                    subtitle_parts.append(spec)
+
+                results.append(CommandBarResult(
+                    icon="\U0001f3e5",
+                    title=name,
+                    subtitle=" \u2022 ".join(subtitle_parts),
+                    category="Prescribers",
+                    action=lambda: self._navigate_to_tab("Prescribers"),
+                    data=dict(row),
+                ))
+            conn.close()
+        except Exception as e:
+            print(f"Command bar prescriber search error: {e}")
         return results
 
     # ------------------------------------------------------------------ Actions
@@ -461,65 +587,90 @@ class CommandBar(QDialog):
             except Exception as e:
                 print(f"Command bar action error: {e}")
 
-    def _navigate_to_tab(self, tab_key: str):
-        """Switch to a specific tab by name."""
+    def _navigate_to_tab(self, tab_text: str):
+        """Switch to a specific tab by matching tab label text."""
         win = self.main_window
-        if not hasattr(win, "tabs"):
+        tabs = getattr(win, "main_tabs", None)
+        if not tabs:
             return
-        tabs = win.tabs
-        tab_map = {
-            "dashboard": "Dashboard",
-            "orders": "Orders",
-            "patients": "Patients",
-            "inventory": "Inventory",
-            "refills": "Refill",
-        }
-        target = tab_map.get(tab_key, "")
+        target = tab_text.lower()
         for i in range(tabs.count()):
-            if target.lower() in tabs.tabText(i).lower():
+            if target in tabs.tabText(i).lower():
                 tabs.setCurrentIndex(i)
                 return
 
     def _navigate_to_inventory(self, hcpcs: str):
         """Switch to inventory tab and search for the HCPCS code."""
-        self._navigate_to_tab("inventory")
+        self._navigate_to_tab("Inventory")
         win = self.main_window
-        if hasattr(win, "inventory_search_edit"):
-            win.inventory_search_edit.setText(hcpcs)
+        # Try multiple possible search widget names
+        for attr in ("inventory_search_edit", "inv_search", "inventory_search"):
+            search_widget = getattr(win, attr, None)
+            if search_widget and hasattr(search_widget, "setText"):
+                search_widget.setText(hcpcs)
+                return
+        # Fallback: try calling a search method
+        if hasattr(win, "search_inventory"):
+            try:
+                win.search_inventory(hcpcs)
+            except Exception:
+                pass
 
-    def _navigate_to_patient(self, patient_id: int):
-        """Switch to patients tab."""
-        self._navigate_to_tab("patients")
+    def _navigate_to_patient(self, patient_id: int, last_name: str = ""):
+        """Switch to patients tab and search for the patient."""
+        self._navigate_to_tab("Patients")
+        win = self.main_window
+        search_widget = getattr(win, "patient_search", None)
+        if search_widget and hasattr(search_widget, "setText") and last_name:
+            search_widget.setText(last_name)
+            if hasattr(win, "search_patients"):
+                try:
+                    win.search_patients()
+                except Exception:
+                    pass
 
     def _open_order(self, order_id: int):
         """Open the order editor for the given order."""
         win = self.main_window
         if hasattr(win, "open_order_editor"):
-            win.open_order_editor(order_id)
+            try:
+                win.open_order_editor(order_id)
+            except Exception:
+                pass
         elif hasattr(win, "edit_order_by_id"):
-            win.edit_order_by_id(order_id)
+            try:
+                win.edit_order_by_id(order_id)
+            except Exception:
+                pass
 
-    def _run_action(self, method_name: str):
+    def _run_action(self, action_key: str):
         """Run a named action on the main window."""
         win = self.main_window
-        actions_map = {
-            "_action_new_order": lambda: (
-                win.open_new_order_wizard() if hasattr(win, "open_new_order_wizard")
-                else None
+        actions = {
+            "new_order": lambda: (
+                win.open_new_order_wizard()
+                if hasattr(win, "open_new_order_wizard") else None
             ),
-            "_action_add_inventory": lambda: (
-                win.add_inventory_item() if hasattr(win, "add_inventory_item")
-                else None
+            "new_patient": lambda: (
+                win.add_new_patient()
+                if hasattr(win, "add_new_patient") else None
             ),
-            "_action_new_patient": lambda: (
-                win.add_patient() if hasattr(win, "add_patient")
-                else None
+            "add_inventory": lambda: (
+                win.add_inventory_item()
+                if hasattr(win, "add_inventory_item") else None
             ),
-            "_action_sticky_notes": lambda: (
-                win.open_sticky_notes() if hasattr(win, "open_sticky_notes")
-                else None
+            "sticky_notes": lambda: (
+                win._open_sticky_notes_manager()
+                if hasattr(win, "_open_sticky_notes_manager") else None
+            ),
+            "settings": lambda: (
+                win.open_settings()
+                if hasattr(win, "open_settings") else None
             ),
         }
-        action = actions_map.get(method_name)
+        action = actions.get(action_key)
         if action:
-            action()
+            try:
+                action()
+            except Exception as e:
+                print(f"Command bar action error: {e}")

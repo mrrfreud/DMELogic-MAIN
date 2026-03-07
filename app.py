@@ -159,6 +159,8 @@ def main():
     ocr_status = ensure_ocr_configured()
     
     # --- Authentication: Show login dialog before main window ---
+    is_secondary = "--window-instance" in sys.argv
+    
     logging.info("Showing login dialog...")
     login_dialog = LoginDialog()
     result = login_dialog.exec()
@@ -176,8 +178,8 @@ def main():
     
     logging.info(f"User '{session.username}' logged in successfully")
     
-    # Show warning if OCR features are limited
-    if not ocr_status.fully_operational and not ocr_status.ocr_available:
+    # Show warning if OCR features are limited (primary window only)
+    if not is_secondary and not ocr_status.fully_operational and not ocr_status.ocr_available:
         QMessageBox.warning(
             None,
             "OCR Features Limited",
@@ -195,13 +197,23 @@ def main():
     base_title = win.windowTitle()
     roles = get_user_roles(session.user_id, session._folder_path)
     role_str = ", ".join(roles) if roles else "User"
-    win.setWindowTitle(f"{base_title}  |  👤 {session.username} ({role_str})")
+    window_label = " (2)" if is_secondary else ""
+    win.setWindowTitle(f"{base_title}  |  \U0001f464 {session.username} ({role_str}){window_label}")
     
     win.show()
     logging.info("Application started successfully.")
-    
-    # Show unbilled orders reminder after main window is shown
-    _show_unbilled_orders_reminder(win)
+
+    # Style all calendar popups now that the UI is fully built
+    try:
+        from dme_theme import style_all_calendars
+        style_all_calendars(win)
+        logging.info("Calendar popups styled.")
+    except Exception as e:
+        logging.warning(f"Could not style calendars: {e}")
+
+    # Show unbilled orders reminder after main window is shown (primary only)
+    if not is_secondary:
+        _show_unbilled_orders_reminder(win)
 
     sys.exit(app.exec())
 

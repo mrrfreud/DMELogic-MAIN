@@ -33,9 +33,9 @@ STATUS COLORS (badge backgrounds + text):
     STATUS_COLORS dict maps status name → (bg, text, border) hex tuples
 """
 
-from PyQt6.QtWidgets import QApplication, QProxyStyle, QStyle
-from PyQt6.QtGui import QFont, QFontDatabase, QColor, QPalette
-from PyQt6.QtCore import Qt
+from PyQt6.QtWidgets import QApplication, QProxyStyle, QStyle, QCalendarWidget, QDateEdit
+from PyQt6.QtGui import QFont, QFontDatabase, QColor, QPalette, QTextCharFormat
+from PyQt6.QtCore import Qt, QObject, QEvent
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -573,21 +573,80 @@ QCalendarWidget {{
     background: {C.WHITE};
     border: 1px solid {C.SLATE_200};
     border-radius: 6px;
+    min-width: 300px;
+    min-height: 240px;
+}}
+QCalendarWidget QWidget#qt_calendar_navigationbar {{
+    background: {C.SLATE_50};
+    border-bottom: 1px solid {C.SLATE_200};
+    border-top-left-radius: 6px;
+    border-top-right-radius: 6px;
+    min-height: 36px;
+    padding: 2px 6px;
 }}
 QCalendarWidget QToolButton {{
     background: transparent;
     color: {C.TEXT_PRIMARY};
     border: none;
-    padding: 4px;
+    padding: 6px 10px;
     border-radius: 4px;
+    font-size: 13px;
+    font-weight: 600;
 }}
 QCalendarWidget QToolButton:hover {{
-    background: {C.SLATE_100};
+    background: {C.SLATE_200};
+}}
+QCalendarWidget QToolButton#qt_calendar_prevmonth,
+QCalendarWidget QToolButton#qt_calendar_nextmonth {{
+    qproperty-iconSize: 14px;
+    min-width: 28px;
 }}
 QCalendarWidget QAbstractItemView {{
     background: {C.WHITE};
     selection-background-color: {C.TEAL};
     selection-color: white;
+    font-size: 12px;
+    outline: none;
+    gridline-color: {C.SLATE_100};
+}}
+QCalendarWidget QAbstractItemView::item {{
+    padding: 4px;
+    min-width: 32px;
+    min-height: 28px;
+}}
+QCalendarWidget QAbstractItemView::item:hover {{
+    background-color: {C.TEAL_PALE};
+    border-radius: 4px;
+}}
+QCalendarWidget QAbstractItemView::item:selected {{
+    background-color: {C.TEAL};
+    color: white;
+    border-radius: 4px;
+}}
+QCalendarWidget #qt_calendar_calendarview {{
+    background: {C.WHITE};
+}}
+QCalendarWidget QMenu {{
+    background: {C.WHITE};
+    border: 1px solid {C.SLATE_200};
+    border-radius: 4px;
+    padding: 4px;
+}}
+QCalendarWidget QMenu::item {{
+    padding: 4px 20px;
+}}
+QCalendarWidget QMenu::item:selected {{
+    background: {C.TEAL_PALE};
+    color: {C.TEAL_DARK};
+}}
+QCalendarWidget QSpinBox {{
+    border: 1px solid {C.SLATE_300};
+    border-radius: 3px;
+    padding: 2px 4px;
+    background: {C.WHITE};
+    color: {C.TEXT_PRIMARY};
+    font-size: 13px;
+    min-width: 60px;
 }}
 
 /* ══════════════════════════════════════════════════════════════════
@@ -1251,6 +1310,103 @@ QFrame[role="doc-row-selected"] {{
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+#  CALENDAR POPUP STYLING
+# ─────────────────────────────────────────────────────────────────────────────
+
+class _CalendarStyleFilter(QObject):
+    """
+    App-level event filter that auto-styles every QCalendarWidget
+    pop-up when it becomes visible.  Installed once by apply_theme().
+    """
+
+    _styled: set  # track already-configured widgets by id
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._styled = set()
+
+    def eventFilter(self, obj: QObject, event: QEvent) -> bool:
+        # QCalendarWidget fires Show when the popup opens
+        if event.type() == QEvent.Type.Show and isinstance(obj, QCalendarWidget):
+            wid = id(obj)
+            if wid not in self._styled:
+                self._styled.add(wid)
+                _configure_calendar(obj)
+        return False
+
+
+# Singleton filter instance (kept alive as class attribute)
+_calendar_filter_instance: _CalendarStyleFilter | None = None
+
+
+def _configure_calendar(cal: QCalendarWidget) -> None:
+    """Configure a QCalendarWidget for a polished, readable look."""
+    # Use single-letter day headers (S M T W T F S) for compact display
+    cal.setHorizontalHeaderFormat(
+        QCalendarWidget.HorizontalHeaderFormat.SingleLetterDayNames
+    )
+    # Hide week numbers column
+    cal.setVerticalHeaderFormat(
+        QCalendarWidget.VerticalHeaderFormat.NoVerticalHeader
+    )
+
+    # Enforce minimum popup size so cells aren't crushed
+    cal.setMinimumSize(280, 220)
+
+    # Style the header row (day-of-week labels)
+    header_fmt = QTextCharFormat()
+    header_fmt.setForeground(QColor(COLORS.TEXT_SECONDARY))
+    header_fmt.setBackground(QColor(COLORS.SLATE_50))
+    header_fmt.setFontWeight(QFont.Weight.DemiBold)
+    cal.setHeaderTextFormat(header_fmt)
+
+    # Style "today"
+    today_fmt = QTextCharFormat()
+    today_fmt.setForeground(QColor(COLORS.TEAL))
+    today_fmt.setFontWeight(QFont.Weight.Bold)
+    from PyQt6.QtCore import QDate
+    cal.setDateTextFormat(QDate.currentDate(), today_fmt)
+
+    # Grid
+    cal.setGridVisible(False)
+
+
+def style_date_edit(date_edit: QDateEdit) -> None:
+    """
+    Convenience: explicitly configure a QDateEdit's calendar popup.
+    Also installs the event filter so re-shows are handled.
+    """
+    global _calendar_filter_instance
+    if date_edit.calendarPopup():
+        cal = date_edit.calendarWidget()
+        _configure_calendar(cal)
+        if _calendar_filter_instance is not None:
+            cal.installEventFilter(_calendar_filter_instance)
+
+
+def style_all_calendars(root_widget=None) -> None:
+    """
+    Walk a widget tree (or all app widgets) and configure every
+    QDateEdit calendar popup found.  Call after building the UI.
+    """
+    global _calendar_filter_instance
+    app = QApplication.instance()
+    if root_widget is not None:
+        widgets = root_widget.findChildren(QDateEdit)
+    elif app is not None:
+        widgets = [w for w in app.allWidgets() if isinstance(w, QDateEdit)]
+    else:
+        return
+
+    for de in widgets:
+        if de.calendarPopup():
+            cal = de.calendarWidget()
+            _configure_calendar(cal)
+            if _calendar_filter_instance is not None:
+                cal.installEventFilter(_calendar_filter_instance)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 #  PUBLIC API
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -1296,6 +1452,37 @@ def apply_theme(app: QApplication):
     palette.setColor(QPalette.ColorRole.Mid, QColor(COLORS.SLATE_300))
     palette.setColor(QPalette.ColorRole.Dark, QColor(COLORS.SLATE_500))
     app.setPalette(palette)
+
+    # Install calendar style filter (auto-styles popups on first show)
+    global _calendar_filter_instance
+    _calendar_filter_instance = _CalendarStyleFilter(app)
+
+    # Connect to focusChanged to catch newly-opened calendar popups
+    def _on_focus_changed(old, new):
+        if new is not None:
+            # Walk up to check if this widget is inside a QCalendarWidget
+            parent = new
+            while parent is not None:
+                if isinstance(parent, QCalendarWidget):
+                    wid = id(parent)
+                    if wid not in _calendar_filter_instance._styled:
+                        _calendar_filter_instance._styled.add(wid)
+                        _configure_calendar(parent)
+                        parent.installEventFilter(_calendar_filter_instance)
+                    break
+                parent = parent.parent() if hasattr(parent, 'parent') else None
+
+    app.focusChanged.connect(_on_focus_changed)
+
+    # Retroactively style any QCalendarWidgets already in existence
+    for widget in app.allWidgets():
+        if isinstance(widget, QCalendarWidget):
+            _configure_calendar(widget)
+            widget.installEventFilter(_calendar_filter_instance)
+        elif isinstance(widget, QDateEdit) and widget.calendarPopup():
+            cal = widget.calendarWidget()
+            _configure_calendar(cal)
+            cal.installEventFilter(_calendar_filter_instance)
 
     print("[DMELogic] Theme applied — v2.4 design system loaded.")
 

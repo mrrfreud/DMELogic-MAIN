@@ -18,7 +18,7 @@ from PyQt6.QtWidgets import (
     QFrame, QSizePolicy, QDialog, QMessageBox, QTableWidget, QToolBar, QApplication, QFileDialog, QScrollArea,
     QSlider, QWidgetAction
 )
-from PyQt6.QtGui import QIcon, QAction
+from PyQt6.QtGui import QIcon, QAction, QShortcut, QKeySequence
 from PyQt6.QtCore import QSize, Qt
 from pathlib import Path
 
@@ -408,6 +408,92 @@ def build_patients_tab(self) -> QWidget:
     return tab
 
 
+# ---------------------------------------------------------------------------
+# Windows Taskbar: separate buttons per window
+# ---------------------------------------------------------------------------
+
+def _set_taskbar_appid(window, appid: str) -> bool:
+    """Set per-window AppUserModelID so Windows shows separate taskbar buttons.
+
+    Uses the Windows Shell COM API (SHGetPropertyStoreForWindow) to assign
+    a unique ID to each window, preventing Windows from grouping them.
+    """
+    if sys.platform != "win32":
+        return False
+    try:
+        import ctypes
+        from ctypes import (
+            c_void_p, c_ulong, c_ushort, c_ubyte, c_wchar_p,
+            c_long, byref, POINTER, Structure, WINFUNCTYPE,
+        )
+
+        class GUID(Structure):
+            _fields_ = [
+                ("Data1", c_ulong), ("Data2", c_ushort),
+                ("Data3", c_ushort), ("Data4", c_ubyte * 8),
+            ]
+
+        class PROPERTYKEY(Structure):
+            _fields_ = [("fmtid", GUID), ("pid", c_ulong)]
+
+        class PROPVARIANT(Structure):
+            _fields_ = [
+                ("vt", c_ushort),
+                ("wReserved1", c_ushort),
+                ("wReserved2", c_ushort),
+                ("wReserved3", c_ushort),
+                ("pwszVal", c_wchar_p),
+            ]
+
+        # IID_IPropertyStore: {886D8EEB-8CF2-4446-8D02-CDBA1DBDCF99}
+        IID_IPropertyStore = GUID(
+            0x886D8EEB, 0x8CF2, 0x4446,
+            (c_ubyte * 8)(0x8D, 0x02, 0xCD, 0xBA, 0x1D, 0xBD, 0xCF, 0x99),
+        )
+
+        # PKEY_AppUserModel_ID: {9F4C2855-9F79-4B39-A8D0-E1D42DE1D5F3}, 5
+        PKEY_AppUserModel_ID = PROPERTYKEY(
+            GUID(0x9F4C2855, 0x9F79, 0x4B39,
+                 (c_ubyte * 8)(0xA8, 0xD0, 0xE1, 0xD4, 0x2D, 0xE1, 0xD5, 0xF3)),
+            5,
+        )
+
+        hwnd = int(window.winId())
+
+        # Get IPropertyStore for this window
+        pps = c_void_p()
+        hr = ctypes.windll.shell32.SHGetPropertyStoreForWindow(
+            hwnd, byref(IID_IPropertyStore), byref(pps),
+        )
+        if hr != 0 or not pps:
+            return False
+
+        # Walk the COM vtable to call SetValue (index 6)
+        vtbl_ptr = ctypes.cast(pps, POINTER(c_void_p))[0]
+        vtbl = ctypes.cast(vtbl_ptr, POINTER(c_void_p * 8))[0]
+
+        # IPropertyStore::SetValue(this, REFPROPERTYKEY, REFPROPVARIANT)
+        SetValueProto = WINFUNCTYPE(c_long, c_void_p,
+                                    POINTER(PROPERTYKEY), POINTER(PROPVARIANT))
+        SetValue = SetValueProto(vtbl[6])
+
+        pv = PROPVARIANT()
+        pv.vt = 31  # VT_LPWSTR
+        pv.pwszVal = appid
+
+        SetValue(pps, byref(PKEY_AppUserModel_ID), byref(pv))
+
+        # IPropertyStore::Release (index 2)
+        ReleaseProto = WINFUNCTYPE(c_ulong, c_void_p)
+        Release = ReleaseProto(vtbl[2])
+        Release(pps)
+
+        return True
+    except Exception as e:
+        print(f"Taskbar appid error: {e}")
+        return False
+
+
 class MainWindow(PDFViewer):
     """Primary window for the application.
 
@@ -415,6 +501,10 @@ class MainWindow(PDFViewer):
     behavior is preserved. Over time we will move logic from
     app_legacy.PDFViewer into this class and slim down app_legacy.
     """
+
+    # Class-level list to keep secondary windows alive (prevent GC)
+    _secondary_windows: list = []
+    _window_counter: int = 1
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -432,6 +522,63 @@ class MainWindow(PDFViewer):
         self._setup_theme_menu()
         self._setup_tools_menu()
         self._setup_help_menu()
+
+        # --- Multi-window: Ctrl+2 opens a second full window ---
+        try:
+            shortcut = QShortcut(QKeySequence("Ctrl+2"), self)
+            shortcut.activated.connect(self._open_new_window)
+        except Exception:
+            pass
+
+    def _open_new_window(self):
+        """Open a second fully independent application instance (Ctrl+2).
+
+        Launches a completely separate process so each window has its own
+        event loop. This means modal dialogs in one window will NOT block
+        the other — you can have an order editor open in Window 1 and
+        still freely use Window 2 to answer a phone call.
+        """
+        import logging
+        import subprocess
+        logger = logging.getLogger("multi_window")
+        try:
+            # Determine the correct executable / script to launch
+            if getattr(sys, "frozen", False):
+                # Running as compiled .exe — just launch the same exe
+                exe_path = sys.executable
+                subprocess.Popen(
+                    [exe_path, "--window-instance"],
+                    creationflags=subprocess.CREATE_NEW_PROCESS_GROUP
+                    | subprocess.DETACHED_PROCESS,
+                )
+            else:
+                # Running from source — launch python app.py
+                import os
+                script = os.path.join(
+                    os.path.dirname(os.path.dirname(os.path.dirname(
+                        os.path.abspath(__file__)
+                    ))),
+                    "app.py",
+                )
+                subprocess.Popen(
+                    [sys.executable, script, "--window-instance"],
+                    creationflags=subprocess.CREATE_NEW_PROCESS_GROUP
+                    | subprocess.DETACHED_PROCESS,
+                )
+
+            logger.info("Launched independent second window (separate process)")
+
+            if hasattr(self, "toast") and self.toast:
+                self.toast.info("Opening second window\u2026")
+        except Exception as e:
+            logger.exception(f"Failed to open new window: {e}")
+            try:
+                QMessageBox.warning(
+                    self, "New Window",
+                    f"Could not open a new window:\n{e}",
+                )
+            except Exception:
+                pass
 
     def _get_or_create_menu(self, title_candidates: Iterable[str], fallback_title: str):
         """Return an existing menu matching one of the given titles, else create it."""

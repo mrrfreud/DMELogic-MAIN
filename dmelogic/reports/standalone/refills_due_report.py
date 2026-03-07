@@ -246,7 +246,13 @@ class RefillsDueReport(QDialog):
                     || COALESCE(o.patient_first_name,'')                       AS patient_name,
                 COALESCE(o.patient_phone, '')                                 AS phone,
                 COALESCE(o.refill_due_date, '')                               AS refill_due_date,
-                COALESCE(o.delivery_date, o.order_date, o.created_date)       AS last_date,
+                COALESCE(
+                    NULLIF(o.order_date, ''),
+                    NULLIF(o.delivery_date, '01/01/2000'),
+                    NULLIF(o.delivery_date, '2000-01-01'),
+                    NULLIF(o.delivery_date, ''),
+                    o.created_date
+                )                                                             AS last_date,
                 COALESCE(o.order_status, '')                                  AS status,
                 COALESCE(o.refill_completed, 0)                               AS refill_completed,
                 COALESCE(o.refill_number, 0)                                  AS refill_number,

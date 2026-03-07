@@ -4,7 +4,7 @@ Single source of truth for version number.
 """
 
 # Application version - update this when releasing new versions
-APP_VERSION = "2.0.20.192"
+APP_VERSION = "2.0.24.200"
 
 # GitHub repository for update checks
 GITHUB_REPO = "mrrfreud/DMELogic-Refactored"

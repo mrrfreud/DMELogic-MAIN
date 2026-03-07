@@ -3876,7 +3876,10 @@ class NewOrderDialog(QDialog):
                     # Refresh the prescriber list
                     self.load_prescribers()
                     print(f"✅ Added prescriber: {prescriber_data['last_name']}, {prescriber_data['first_name']}")
-                    QMessageBox.information(self, "Success", "Prescriber added successfully!")
+                    if self.toast:
+                        self.toast.success("Prescriber added successfully!")
+                    else:
+                        QMessageBox.information(self, "Success", "Prescriber added successfully!")
                     
                 except sqlite3.IntegrityError as e:
                     if "npi_number" in str(e):
@@ -3929,7 +3932,10 @@ class NewOrderDialog(QDialog):
                     # Refresh the inventory list
                     self.load_inventory()
                     print(f"✅ Added inventory item: {item_data['description']}")
-                    QMessageBox.information(self, "Success", "Inventory item added successfully!")
+                    if self.toast:
+                        self.toast.success("Inventory item added successfully!")
+                    else:
+                        QMessageBox.information(self, "Success", "Inventory item added successfully!")
                     
                 except Exception as e:
                     print(f"Error adding inventory item: {e}")
@@ -5151,6 +5157,9 @@ class NewOrderDialog(QDialog):
                     day_supply, str(new_qty), cost_ea, total, pa_number, directions
                 ))
             
+            # Capture source order ID before closing this dialog
+            source_order_id = int(self.current_order_id)
+            
             # Close current dialog
             self.accept()
             
@@ -5193,6 +5202,51 @@ class NewOrderDialog(QDialog):
             )
             
             if refill_dialog.exec():
+                # Mark the source order as refill-completed and locked,
+                # and set parent_order_id / refill_number on the new order.
+                try:
+                    new_order_id = getattr(refill_dialog, 'current_order_id', None)
+                    db = getattr(self.parent, 'orders_database_file', None)
+                    if new_order_id and db:
+                        import sqlite3
+                        conn = sqlite3.connect(db)
+                        cur = conn.cursor()
+
+                        # Determine base order and next refill number
+                        cur.execute(
+                            "SELECT COALESCE(parent_order_id, 0) FROM orders WHERE id = ?",
+                            (source_order_id,)
+                        )
+                        row = cur.fetchone()
+                        base_order_id = row[0] if row and row[0] else source_order_id
+
+                        cur.execute(
+                            "SELECT MAX(COALESCE(refill_number, 0)) FROM orders WHERE parent_order_id = ? OR id = ?",
+                            (base_order_id, base_order_id)
+                        )
+                        max_refill = cur.fetchone()[0] or 0
+                        next_refill = max_refill + 1
+
+                        # Set parent_order_id and refill_number on the new refill order
+                        cur.execute(
+                            "UPDATE orders SET parent_order_id = ?, refill_number = ? WHERE id = ?",
+                            (base_order_id, next_refill, int(new_order_id))
+                        )
+
+                        # Mark the source order as refill-completed and locked
+                        cur.execute(
+                            "UPDATE orders SET refill_completed = 1, is_locked = 1, refill_completed_at = ? WHERE id = ?",
+                            (date.today().isoformat(), source_order_id)
+                        )
+
+                        conn.commit()
+                        conn.close()
+                        print(f"✅ Marked source order {source_order_id} as refill_completed, new refill order {new_order_id} (R{next_refill})")
+                except Exception as e:
+                    print(f"⚠️ Failed to mark source order as refilled: {e}")
+                    import traceback
+                    traceback.print_exc()
+
                 # Ask about generating refill request fax
                 reply = QMessageBox.question(
                     self.parent,
@@ -9336,9 +9390,15 @@ class InventoryReportsDialog(QDialog):
                             row_data.append(item.text() if item else "")
                         writer.writerow(row_data)
                 
-                QMessageBox.information(self, "Success", f"Report exported to:\n{file_path}")
+                if self.toast:
+                    self.toast.success(f"Report exported to: {file_path}")
+                else:
+                    QMessageBox.information(self, "Success", f"Report exported to:\n{file_path}")
             except Exception as e:
-                QMessageBox.critical(self, "Error", f"Failed to export CSV: {e}")
+                if self.toast:
+                    self.toast.error(f"Failed to export CSV: {e}")
+                else:
+                    QMessageBox.critical(self, "Error", f"Failed to export CSV: {e}")
     
     def export_to_excel(self):
         """Export current report to Excel file."""
@@ -9396,9 +9456,15 @@ class InventoryReportsDialog(QDialog):
                     ws.column_dimensions[openpyxl.utils.get_column_letter(col)].width = 15
                 
                 wb.save(file_path)
-                QMessageBox.information(self, "Success", f"Report exported to:\n{file_path}")
+                if self.toast:
+                    self.toast.success(f"Report exported to: {file_path}")
+                else:
+                    QMessageBox.information(self, "Success", f"Report exported to:\n{file_path}")
             except Exception as e:
-                QMessageBox.critical(self, "Error", f"Failed to export Excel: {e}")
+                if self.toast:
+                    self.toast.error(f"Failed to export Excel: {e}")
+                else:
+                    QMessageBox.critical(self, "Error", f"Failed to export Excel: {e}")
 
 
 class CategoryManagerDialog(QDialog):
@@ -10114,6 +10180,21 @@ class PDFViewer(QMainWindow):
         self.doc = None
         self.zoom_level = 1.0
         self.rotation_angle = 0
+
+        # --- Toast Notification System ---
+        try:
+            from dmelogic.ui.toast_notifications import ToastManager
+            self.toast = ToastManager(self)
+        except Exception:
+            self.toast = None
+
+        # --- Command Bar (Ctrl+K) ---
+        try:
+            from dmelogic.ui.command_bar import CommandBar
+            self.command_bar = CommandBar(self)
+        except Exception:
+            self.command_bar = None
+
         self.folder_path = self.settings.get("last_folder", DEFAULT_FOLDER_PATH)
         # Document index database (per-folder by design). We prefer any existing copy
         # found in common locations (including a centralized db_folder) but default to
@@ -13744,7 +13825,10 @@ class PDFViewer(QMainWindow):
         if reply == QMessageBox.StandardButton.Yes:
             # TODO: Delete from database
             self.patients_table.removeRow(current_row)
-            QMessageBox.information(self, "Deleted", "Patient deleted successfully.")
+            if self.toast:
+                self.toast.success("Patient deleted successfully.")
+            else:
+                QMessageBox.information(self, "Deleted", "Patient deleted successfully.")
 
     def create_prescriber_tab(self):
         """Create the Prescriber Management tab for DME software"""
@@ -14262,7 +14346,10 @@ class PDFViewer(QMainWindow):
                 conn.close()
                 
                 self.load_clinics()
-                QMessageBox.information(self, "Deleted", f"Clinic '{clinic_name}' deleted successfully.")
+                if self.toast:
+                    self.toast.success(f"Clinic '{clinic_name}' deleted successfully.")
+                else:
+                    QMessageBox.information(self, "Deleted", f"Clinic '{clinic_name}' deleted successfully.")
             except Exception as e:
                 QMessageBox.critical(self, "Error", f"Failed to delete clinic: {e}")
 
@@ -15306,7 +15393,10 @@ class PDFViewer(QMainWindow):
                             self.save_category_name(updated_data.get('category', ''))
                     except Exception:
                         pass
-                    QMessageBox.information(self, "Success", "Inventory item updated successfully!")
+                    if self.toast:
+                        self.toast.success("Inventory item updated successfully!")
+                    else:
+                        QMessageBox.information(self, "Success", "Inventory item updated successfully!")
         
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Failed to edit inventory item: {e}")
@@ -15348,7 +15438,10 @@ class PDFViewer(QMainWindow):
                 self.load_inventory_data()
                 if hasattr(self, 'dme_inventory_table'):
                     self.load_dme_inventory_data()
-                QMessageBox.information(self, "Success", "Inventory item deleted successfully!")
+                if self.toast:
+                    self.toast.success("Inventory item deleted successfully!")
+                else:
+                    QMessageBox.information(self, "Success", "Inventory item deleted successfully!")
                 
             except Exception as e:
                 QMessageBox.critical(self, "Error", f"Failed to delete inventory item: {e}")
@@ -15449,7 +15542,7 @@ class PDFViewer(QMainWindow):
         self.btn_print_1500.clicked.connect(self.print_1500_for_selected_order)
         self.btn_delete_order.clicked.connect(self.delete_order)
         self.btn_link_patient.clicked.connect(self.show_link_order_dialog)
-        if hasattr(self, "btn_import_rx"):
+        if hasattr(self, "btn_import_rx") and hasattr(self, "_open_rx_import"):
             self.btn_import_rx.clicked.connect(self._open_rx_import)
         
         # Connect table selection to update summary
@@ -17308,6 +17401,8 @@ class PDFViewer(QMainWindow):
         import datetime
         from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
         import matplotlib.pyplot as plt
+        from dmelogic.reports.ui.report_viewer import ReportViewer
+        from dmelogic.reports.base.report_engine import ReportData, ReportColumn, ReportRow
 
         reports_tab = QWidget()
         self.reports_tab = reports_tab  # keep reference for programmatic switching
@@ -17383,15 +17478,15 @@ class PDFViewer(QMainWindow):
                 fn()
             btn.clicked.connect(_handler)
 
-        _bind_report(patient_btn, self.generate_patient_report)
-        _bind_report(order_btn, self.generate_order_report)
-        _bind_report(recon_btn, self.generate_reconciliation_report)
-        _bind_report(delivery_btn, self.generate_delivery_report)
-        _bind_report(invoice_btn, self.generate_invoice_report)
-        _bind_report(inventory_btn, self.open_inventory_reports_dialog)
-        _bind_report(billing_btn, self.generate_billing_report)
-        _bind_report(profit_btn, self.generate_profit_report_per_order)
-        _bind_report(ar_aging_btn, self.open_ar_report)
+        _bind_report(patient_btn, self.open_foundation_patient_report)
+        _bind_report(order_btn, self.open_foundation_order_report)
+        _bind_report(recon_btn, self.open_foundation_reconciliation_report)
+        _bind_report(delivery_btn, self.open_foundation_delivery_report)
+        _bind_report(invoice_btn, self.open_foundation_invoice_report)
+        _bind_report(inventory_btn, self.open_inventory_reports_chooser)
+        _bind_report(billing_btn, self.open_foundation_billing_report)
+        _bind_report(profit_btn, self.open_foundation_profit_report)
+        _bind_report(ar_aging_btn, self.open_foundation_claims_aging_report)
         _bind_report(refills_btn, self.open_refills_due_report)
         _bind_report(analytics_btn, self.open_order_analytics)
         import_payments_btn.clicked.connect(self.import_payment_reconciliation)
@@ -17507,15 +17602,15 @@ class PDFViewer(QMainWindow):
 
         main_layout.addLayout(kpi_row)
 
-        # ===== Center area: chart + table via splitter =====
-        splitter = QSplitter(Qt.Orientation.Vertical)
-        splitter.setHandleWidth(6)
+        # ===== Center area: ReportViewer (table + filters + export) =====
+        self.report_viewer = ReportViewer(
+            parent=reports_tab,
+            show_chart_area=True,
+            show_filters=False   # filters are in the toolbar above
+        )
+        main_layout.addWidget(self.report_viewer, 1)
 
-        # --- Chart panel ---
-        chart_frame = QFrame()
-        chart_layout = QVBoxLayout(chart_frame)
-        chart_layout.setContentsMargins(0, 6, 0, 6)
-
+        # Keep legacy chart objects for backward compat with update_reports_visuals
         self.reports_fig, self.reports_ax = plt.subplots(figsize=(8, 3), tight_layout=True)
         self.reports_canvas = FigureCanvas(self.reports_fig)
         self.reports_ax.text(
@@ -17526,82 +17621,19 @@ class PDFViewer(QMainWindow):
         )
         self.reports_ax.set_xticks([])
         self.reports_ax.set_yticks([])
-        chart_layout.addWidget(self.reports_canvas)
 
-        splitter.addWidget(chart_frame)
+        # Embed the legacy chart canvas into the ReportViewer chart area
+        self.report_viewer.set_chart(self.reports_canvas)
 
-        # --- Table panel ---
-        table_frame = QFrame()
-        table_layout = QVBoxLayout(table_frame)
-        table_layout.setContentsMargins(0, 0, 0, 0)
-
-        self.reports_table = QTableWidget()
-        self.reports_table.setAlternatingRowColors(True)
-        self.reports_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
-        self.reports_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
-        self.reports_table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
-        self.reports_table.horizontalHeader().setStretchLastSection(True)
-        self.reports_table.setStyleSheet("""
-            QTableWidget {
-                gridline-color: #e0e0e0;
-                selection-background-color: #bbdefb;
-            }
-        """)
-        table_layout.addWidget(self.reports_table)
-
-        splitter.addWidget(table_frame)
-        splitter.setStretchFactor(0, 1)   # chart
-        splitter.setStretchFactor(1, 2)   # table
-
-        main_layout.addWidget(splitter, 1)
+        # Legacy table reference → point to the ReportViewer's built-in table
+        self.reports_table = self.report_viewer.table
 
         # ===== Text preview (used for exports & debugging) =====
-        # Keep it but keep it collapsed/hidden visually; exports rely on it.
         from PyQt6.QtWidgets import QTextEdit
         self.reports_text = QTextEdit()
         self.reports_text.setReadOnly(True)
-        self.reports_text.setVisible(False)  # we don't want a second text area in the UI
+        self.reports_text.setVisible(False)
         main_layout.addWidget(self.reports_text)
-
-        # ===== Export bar =====
-        export_row = QHBoxLayout()
-        export_row.addItem(QSpacerItem(20, 10, QSizePolicy.Policy.Expanding,
-                                       QSizePolicy.Policy.Minimum))
-
-        pdf_btn = QPushButton("Export PDF")
-        pdf_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        pdf_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #0288d1;
-                color: white;
-                border-radius: 4px;
-                padding: 6px 14px;
-            }
-            QPushButton:hover {
-                background-color: #0277bd;
-            }
-        """)
-        pdf_btn.clicked.connect(self.export_report_pdf)
-
-        excel_btn = QPushButton("Export Excel")
-        excel_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        excel_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #43a047;
-                color: white;
-                border-radius: 4px;
-                padding: 6px 14px;
-            }
-            QPushButton:hover {
-                background-color: #388e3c;
-            }
-        """)
-        excel_btn.clicked.connect(self.export_report_excel)
-
-        export_row.addWidget(pdf_btn)
-        export_row.addWidget(excel_btn)
-
-        main_layout.addLayout(export_row)
 
         # Final: attach tab
         self.main_tabs.addTab(reports_tab, "Reports")
@@ -18447,7 +18479,10 @@ class PDFViewer(QMainWindow):
             # Build PDF
             doc.build(elements)
             
-            QMessageBox.information(self, "Export Complete", f"Refills report exported to:\n{file_path}")
+            if self.toast:
+                self.toast.success(f"Refills report exported to: {file_path}")
+            else:
+                QMessageBox.information(self, "Export Complete", f"Refills report exported to:\n{file_path}")
             
         except Exception as e:
             QMessageBox.critical(self, "Export Error", f"Failed to export PDF:\n{e}")
@@ -18489,7 +18524,10 @@ class PDFViewer(QMainWindow):
                 if success:
                     # Remove row from table after successful creation
                     self.refills_table.removeRow(row)
-                    QMessageBox.information(self, "Success", f"Refill order created for {patient_name}")
+                    if self.toast:
+                        self.toast.success(f"Refill order created for {patient_name}")
+                    else:
+                        QMessageBox.information(self, "Success", f"Refill order created for {patient_name}")
         
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Failed to create refill order:\n{e}")
@@ -23617,6 +23655,28 @@ class PDFViewer(QMainWindow):
         conn.close()
         print(f"✅ Orders database initialized: {self.orders_database_file}")
 
+        # Fix stale refill_completed flags: parent orders that have child refills
+        # but weren't marked as completed (data integrity check)
+        try:
+            conn = sqlite3.connect(self.orders_database_file)
+            cur = conn.cursor()
+            cur.execute("""
+                UPDATE orders SET refill_completed = 1, is_locked = 1,
+                    refill_completed_at = COALESCE(refill_completed_at, date('now'))
+                WHERE id IN (
+                    SELECT DISTINCT o.id
+                    FROM orders o
+                    INNER JOIN orders c ON c.parent_order_id = o.id
+                    WHERE COALESCE(o.refill_completed, 0) = 0 OR COALESCE(o.is_locked, 0) = 0
+                )
+            """)
+            if cur.rowcount > 0:
+                print(f"🔧 Auto-fixed {cur.rowcount} order(s) with stale refill_completed flags")
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            print(f"⚠️ Refill flag integrity check failed: {e}")
+
         # Run Reserved RX columns migration
         try:
             from reserved_rx_manager import migrate_reserved_rx_columns
@@ -24057,7 +24117,10 @@ class PDFViewer(QMainWindow):
             self.save_insurance_name(patient_data.get('secondary_insurance', '').strip())
             
             # Show success message
-            QMessageBox.information(self, "Success", message)
+            if self.toast:
+                self.toast.success(message)
+            else:
+                QMessageBox.information(self, "Success", message)
             
             # Refresh insurance combos and search results if there's an active search
             self.refresh_insurance_combos()
@@ -32651,6 +32714,137 @@ class PDFViewer(QMainWindow):
             import traceback
             traceback.print_exc()
 
+    # ========================================================================
+    # Foundation Report Openers (business + inventory)
+    # ========================================================================
+
+    def _get_db_folder(self) -> str:
+        """Return the database folder path for foundation reports."""
+        try:
+            from dmelogic.config import _default_db_folder
+            return _default_db_folder()
+        except Exception:
+            return r"C:\Dme_Solutions\Data"
+
+    def _open_foundation_report(self, report_class, module_path: str):
+        """Generic opener for any foundation report dialog."""
+        try:
+            import importlib
+            mod = importlib.import_module(module_path)
+            cls = getattr(mod, report_class)
+            dialog = cls(parent=self, folder_path=self._get_db_folder())
+            dialog.show()
+            dialog.raise_()
+            dialog.activateWindow()
+        except Exception as e:
+            QMessageBox.critical(self, "Report Error", f"Failed to open report:\n{e}")
+            import traceback
+            traceback.print_exc()
+
+    def open_foundation_patient_report(self):
+        """Open Patient Report (foundation)."""
+        self._open_foundation_report("PatientReport", "dmelogic.reports.business.patient_report")
+
+    def open_foundation_order_report(self):
+        """Open Order Report (foundation)."""
+        self._open_foundation_report("OrderReport", "dmelogic.reports.business.order_report")
+
+    def open_foundation_billing_report(self):
+        """Open Billing Report (foundation)."""
+        self._open_foundation_report("BillingReport", "dmelogic.reports.business.billing_report")
+
+    def open_foundation_delivery_report(self):
+        """Open Delivery Report (foundation)."""
+        self._open_foundation_report("DeliveryReport", "dmelogic.reports.business.delivery_report")
+
+    def open_foundation_invoice_report(self):
+        """Open Invoice Report (foundation)."""
+        self._open_foundation_report("InvoiceReport", "dmelogic.reports.business.invoice_report")
+
+    def open_foundation_profit_report(self):
+        """Open Profit Report (foundation)."""
+        self._open_foundation_report("ProfitReport", "dmelogic.reports.business.profit_report")
+
+    def open_foundation_reconciliation_report(self):
+        """Open Reconciliation Report (foundation)."""
+        self._open_foundation_report("ReconciliationReport", "dmelogic.reports.business.reconciliation_report")
+
+    def open_foundation_claims_aging_report(self):
+        """Open Claims Aging / AR Report (foundation)."""
+        self._open_foundation_report("ClaimsAgingReport", "dmelogic.reports.business.claims_aging")
+
+    def open_inventory_reports_chooser(self):
+        """Open a chooser dialog listing all 12 inventory reports."""
+        try:
+            from PyQt6.QtWidgets import QDialog, QVBoxLayout, QLabel, QPushButton, QGridLayout, QFrame
+            from PyQt6.QtCore import Qt
+
+            chooser = QDialog(self)
+            chooser.setWindowTitle("📦 Inventory Reports")
+            chooser.setModal(False)
+            chooser.resize(600, 500)
+
+            layout = QVBoxLayout(chooser)
+
+            title = QLabel("📦 Choose an Inventory Report")
+            title.setStyleSheet("font-size: 16pt; font-weight: bold; color: #1976d2; padding: 10px;")
+            title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            layout.addWidget(title)
+
+            grid = QGridLayout()
+            grid.setSpacing(8)
+
+            inventory_reports = [
+                ("⚠️ Low Stock",         "LowStockReport",         "dmelogic.reports.inventory.low_stock"),
+                ("🚫 Out of Stock",       "OutOfStockReport",       "dmelogic.reports.inventory.out_of_stock"),
+                ("📋 Reorder by Vendor",  "ReorderByVendorReport",  "dmelogic.reports.inventory.reorder_by_vendor"),
+                ("📊 Stock Overview",     "StockOverviewReport",    "dmelogic.reports.inventory.stock_overview"),
+                ("💎 Inventory Value",    "InventoryValueReport",   "dmelogic.reports.inventory.inventory_value"),
+                ("💰 Potential Revenue",  "PotentialRevenueReport", "dmelogic.reports.inventory.potential_revenue"),
+                ("📊 Gross Margin",       "GrossMarginReport",      "dmelogic.reports.inventory.gross_margin"),
+                ("📈 Category Profit",    "CategoryProfitReport",   "dmelogic.reports.inventory.category_profit"),
+                ("💵 Orders Profit",      "OrdersProfitReport",     "dmelogic.reports.inventory.orders_profit"),
+                ("🏆 Top Suppliers",      "TopSuppliersReport",     "dmelogic.reports.inventory.top_suppliers"),
+                ("🏅 Top Brands",         "TopBrandsReport",        "dmelogic.reports.inventory.top_brands"),
+                ("🐌 Slow Moving",        "SlowMovingReport",       "dmelogic.reports.inventory.slow_moving"),
+            ]
+
+            for i, (label, cls_name, mod_path) in enumerate(inventory_reports):
+                btn = QPushButton(label)
+                btn.setCursor(Qt.CursorShape.PointingHandCursor)
+                btn.setMinimumHeight(44)
+                btn.setStyleSheet("""
+                    QPushButton {
+                        background-color: #1976d2;
+                        color: white;
+                        border-radius: 6px;
+                        padding: 8px 16px;
+                        font-size: 10pt;
+                        font-weight: bold;
+                    }
+                    QPushButton:hover {
+                        background-color: #1565c0;
+                    }
+                """)
+                btn.clicked.connect(
+                    lambda checked=False, c=cls_name, m=mod_path: (
+                        self._open_foundation_report(c, m),
+                        chooser.close()
+                    )
+                )
+                row, col = divmod(i, 3)
+                grid.addWidget(btn, row, col)
+
+            layout.addLayout(grid)
+            chooser.show()
+            chooser.raise_()
+            chooser.activateWindow()
+
+        except Exception as e:
+            QMessageBox.critical(self, "Report Error", f"Failed to open inventory reports:\n{e}")
+            import traceback
+            traceback.print_exc()
+
     def generate_billing_report(self):
         """Generate billing analytics report from billing.db (claims and payments) with structured table and PDF output."""
         try:
@@ -41076,6 +41270,58 @@ class FeeScheduleDialog(QDialog):
                     self.reports_table.clear()
                     self.reports_table.setRowCount(0)
                     self.reports_table.setColumnCount(0)
+
+            # ---- Feed data into the ReportViewer via ReportData ----
+            if hasattr(self, 'report_viewer') and headers and rows is not None:
+                try:
+                    from dmelogic.reports.base.report_engine import ReportData, ReportColumn, ReportRow
+                    from datetime import datetime as _dt
+
+                    title = getattr(self, 'current_report_title', None) or report_type.title() or "Report"
+                    columns = []
+                    for h in headers:
+                        # Auto-detect currency columns
+                        dtype = "text"
+                        align = "left"
+                        h_lower = h.lower()
+                        if any(k in h_lower for k in ("price", "cost", "revenue", "total", "billed",
+                                                       "paid", "balance", "amount", "profit", "margin")):
+                            dtype = "currency"
+                            align = "right"
+                        elif any(k in h_lower for k in ("count", "qty", "quantity", "orders", "#")):
+                            dtype = "number"
+                            align = "right"
+                        elif any(k in h_lower for k in ("%", "percent", "rate")):
+                            dtype = "percent"
+                            align = "right"
+                        columns.append(ReportColumn(name=h, display_name=h, data_type=dtype, alignment=align))
+
+                    report_data = ReportData(
+                        title=title,
+                        columns=columns,
+                        summary={
+                            'total_rows': len(rows),
+                            'generated_at': _dt.now().strftime('%m/%d/%Y %I:%M %p')
+                        },
+                        metadata={'generated_at': _dt.now()}
+                    )
+                    for row in rows:
+                        rd = {}
+                        for ci, h in enumerate(headers):
+                            val = row[ci] if ci < len(row) else ""
+                            # Strip $ and commas for currency columns so ReportData can format
+                            if columns[ci].data_type == "currency" and isinstance(val, str):
+                                try:
+                                    val = float(val.replace('$', '').replace(',', ''))
+                                except (ValueError, TypeError):
+                                    pass
+                            rd[h] = val
+                        report_data.add_row(rd)
+
+                    self.report_viewer.load_report(report_data)
+                    self.report_viewer.title_label.setText(title)
+                except Exception as e:
+                    print(f"ReportViewer bridge: {e}")
 
             # KPI defaults
             def set_kpis(labels_vals):
