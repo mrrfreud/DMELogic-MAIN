@@ -34762,7 +34762,12 @@ class PDFViewer(QMainWindow):
             print(f"Reverse refill error: {e}")
 
     def select_order_to_refill(self, seed_order_id: int) -> int | None:
-        """Show a selection dialog listing this patient's orders and return the chosen order id."""
+        """Show a selection dialog listing this patient's orders and return the chosen order id.
+
+        Only shows orders that have at least one item with refills > 0.
+        If only one eligible order exists, returns it immediately (no dialog).
+        Pre-selects the seed order in the dialog.
+        """
         try:
             conn = sqlite3.connect(self.orders_db_path)
             cur = conn.cursor()
@@ -34775,31 +34780,48 @@ class PDFViewer(QMainWindow):
                 conn.close()
                 return None
             last_name, first_name, dob = row
+
+            # Only include orders that have at least one item with refills > 0
             cur.execute(
                 """
-                SELECT id, rx_date, order_status, COALESCE(refill_number,0)
-                FROM orders
-                WHERE UPPER(patient_last_name)=UPPER(?) AND UPPER(patient_first_name)=UPPER(?) AND COALESCE(patient_dob,'')=COALESCE(?, '')
-                  AND COALESCE(refill_completed, 0) = 0
-                ORDER BY rx_date ASC, id ASC
+                SELECT o.id, o.rx_date, o.order_status, COALESCE(o.refill_number, 0),
+                       (SELECT GROUP_CONCAT(CAST(COALESCE(oi.refills, '0') AS INTEGER))
+                        FROM order_items oi WHERE oi.order_id = o.id) AS item_refills
+                FROM orders o
+                WHERE UPPER(o.patient_last_name)=UPPER(?) AND UPPER(o.patient_first_name)=UPPER(?)
+                  AND COALESCE(o.patient_dob,'')=COALESCE(?, '')
+                  AND COALESCE(o.refill_completed, 0) = 0
+                  AND COALESCE(o.is_locked, 0) = 0
+                  AND o.id IN (
+                      SELECT oi2.order_id FROM order_items oi2
+                      WHERE CAST(COALESCE(oi2.refills, '0') AS INTEGER) > 0
+                  )
+                ORDER BY o.rx_date ASC, o.id ASC
                 """,
                 (last_name, first_name, dob),
             )
             orders = cur.fetchall()
 
-            # Fallback: if no orders found (stale refill_completed flags), show ALL orders
+            # Fallback: if no orders found (stale refill_completed flags), try clearing stale flags
             if not orders:
                 cur.execute(
                     """
-                    SELECT id, rx_date, order_status, COALESCE(refill_number,0)
-                    FROM orders
-                    WHERE UPPER(patient_last_name)=UPPER(?) AND UPPER(patient_first_name)=UPPER(?) AND COALESCE(patient_dob,'')=COALESCE(?, '')
-                    ORDER BY rx_date ASC, id ASC
+                    SELECT o.id, o.rx_date, o.order_status, COALESCE(o.refill_number, 0),
+                           (SELECT GROUP_CONCAT(CAST(COALESCE(oi.refills, '0') AS INTEGER))
+                            FROM order_items oi WHERE oi.order_id = o.id) AS item_refills
+                    FROM orders o
+                    WHERE UPPER(o.patient_last_name)=UPPER(?) AND UPPER(o.patient_first_name)=UPPER(?)
+                      AND COALESCE(o.patient_dob,'')=COALESCE(?, '')
+                      AND o.id IN (
+                          SELECT oi2.order_id FROM order_items oi2
+                          WHERE CAST(COALESCE(oi2.refills, '0') AS INTEGER) > 0
+                      )
+                    ORDER BY o.rx_date ASC, o.id ASC
                     """,
                     (last_name, first_name, dob),
                 )
                 orders = cur.fetchall()
-                # Auto-fix: clear stale refill_completed and is_locked flags
+                # Auto-fix: clear stale refill_completed and is_locked flags on eligible orders
                 for (oid, *_rest) in orders:
                     cur.execute(
                         "SELECT COUNT(*) FROM orders WHERE parent_order_id = ?",
@@ -34815,17 +34837,30 @@ class PDFViewer(QMainWindow):
 
             conn.close()
 
+            if not orders:
+                QMessageBox.warning(
+                    self, "No Eligible Orders",
+                    f"No orders for {first_name} {last_name} have items with refills remaining.\n\n"
+                    "If you believe this is an error, use the 🔓 Unlock/Reset Refill tool to fix order flags."
+                )
+                return None
+
+            # If only one eligible order, use it directly — no dialog needed
+            if len(orders) == 1:
+                return int(orders[0][0])
+
             dlg = QDialog(self)
             dlg.setWindowTitle("Select Order to Refill")
-            dlg.resize(600, 300)
+            dlg.resize(700, 320)
             vbox = QVBoxLayout(dlg)
             label = QLabel(f"Select which order for {first_name} {last_name} to refill:")
             vbox.addWidget(label)
             table = QTableWidget()
-            table.setColumnCount(4)
-            table.setHorizontalHeaderLabels(["Order #", "RX Date", "Status", "Refill #"])
+            table.setColumnCount(5)
+            table.setHorizontalHeaderLabels(["Order #", "RX Date", "Status", "Refill #", "Refills Remaining"])
             table.setRowCount(len(orders))
-            for r, (oid, rx_date, status, rno) in enumerate(orders):
+            preselect_row = 0
+            for r, (oid, rx_date, status, rno, item_refills_csv) in enumerate(orders):
                 try:
                     num = self.format_order_number(oid)
                 except Exception:
@@ -34834,9 +34869,15 @@ class PDFViewer(QMainWindow):
                 table.setItem(r, 1, QTableWidgetItem(self.format_date_display(rx_date)))
                 table.setItem(r, 2, QTableWidgetItem(status or "Pending"))
                 table.setItem(r, 3, QTableWidgetItem(str(int(rno or 0))))
+                # Show refills remaining per item
+                refills_display = item_refills_csv or "0"
+                table.setItem(r, 4, QTableWidgetItem(refills_display))
                 table.item(r, 0).setData(Qt.ItemDataRole.UserRole, oid)
+                if oid == seed_order_id:
+                    preselect_row = r
             table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
             table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+            table.selectRow(preselect_row)
             try:
                 table.resizeColumnsToContents()
             except Exception:

@@ -45,6 +45,7 @@ class ProfitReportEngine(ReportEngine):
                    CAST(COALESCE(oi.total, 0) AS REAL) as line_total
             FROM orders o
             JOIN order_items oi ON oi.order_id = o.id
+            WHERE LOWER(COALESCE(o.order_status, '')) IN ('billed', 'shipped', 'picked up', 'delivered', 'paid')
             ORDER BY o.id DESC
             """
         )

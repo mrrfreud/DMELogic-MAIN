@@ -191,6 +191,19 @@ class RefillQueueWidget(QWidget):
         self.btn_process_selected.clicked.connect(self._process_selected)
         action_row.addWidget(self.btn_process_selected)
 
+        # Unlock / Reset refill flag button
+        self.btn_unlock = QPushButton("🔓 Unlock / Reset Refill")
+        self.btn_unlock.setStyleSheet(
+            "background: #F59E0B; color: white; border-radius: 6px; "
+            "padding: 8px 16px; font-weight: 600;"
+        )
+        self.btn_unlock.setToolTip(
+            "Manually unlock an order or mark it as fully refilled.\n"
+            "Use this to fix stuck orders that show errors."
+        )
+        self.btn_unlock.clicked.connect(self._show_refill_override_dialog)
+        action_row.addWidget(self.btn_unlock)
+
         action_row.addStretch()
 
         # Select all checkbox
@@ -836,3 +849,236 @@ class RefillQueueWidget(QWidget):
                     self.main_window.refills_table = old_table
         else:
             QMessageBox.information(self, "Export", "PDF export will be available after integration.")
+
+    # ================================================================
+    # Manual Override / Unlock Dialog
+    # ================================================================
+
+    def _show_refill_override_dialog(self):
+        """Show a dialog to search for any order by patient name or order number and
+        reset its refill_completed / is_locked flags, or mark it as fully refilled."""
+        from PyQt6.QtWidgets import (
+            QDialog, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit,
+            QPushButton, QTableWidget, QTableWidgetItem, QHeaderView,
+            QMessageBox, QRadioButton, QButtonGroup, QGroupBox,
+        )
+
+        dlg = QDialog(self)
+        dlg.setWindowTitle("🔓 Refill Override — Unlock or Reset Orders")
+        dlg.resize(800, 500)
+        layout = QVBoxLayout(dlg)
+
+        # Instructions
+        info = QLabel(
+            "Search for an order by patient name or order number.\n"
+            "Then choose to UNLOCK it (allow re-refill) or MARK AS FULLY REFILLED (hide from queue)."
+        )
+        info.setStyleSheet("color: #374151; font-size: 12px; padding: 6px;")
+        info.setWordWrap(True)
+        layout.addWidget(info)
+
+        # Search bar
+        search_row = QHBoxLayout()
+        search_input = QLineEdit()
+        search_input.setPlaceholderText("Enter patient last name, first name, or order number (e.g., 275)...")
+        search_input.setStyleSheet("padding: 8px; border: 1px solid #D1D5DB; border-radius: 6px; font-size: 13px;")
+        search_row.addWidget(search_input)
+        search_btn = QPushButton("🔍 Search")
+        search_btn.setStyleSheet(
+            "background: #3B82F6; color: white; padding: 8px 16px; border-radius: 6px; font-weight: 600;"
+        )
+        search_row.addWidget(search_btn)
+        layout.addLayout(search_row)
+
+        # Results table
+        results_table = QTableWidget()
+        results_table.setColumnCount(8)
+        results_table.setHorizontalHeaderLabels([
+            "Order #", "Patient", "RX Date", "Status",
+            "Refill #", "Items Refills", "Locked", "Completed"
+        ])
+        results_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        results_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        results_table.setSortingEnabled(True)
+        hdr = results_table.horizontalHeader()
+        hdr.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        hdr.setSectionResizeMode(5, QHeaderView.ResizeMode.Stretch)
+        layout.addWidget(results_table, 1)
+
+        # Action group
+        action_box = QGroupBox("Action")
+        action_layout = QHBoxLayout(action_box)
+        rb_unlock = QRadioButton("🔓 Unlock — Clear flags, allow re-refill")
+        rb_mark_done = QRadioButton("🚫 Mark Fully Refilled — Hide from queue")
+        rb_unlock.setChecked(True)
+        action_layout.addWidget(rb_unlock)
+        action_layout.addWidget(rb_mark_done)
+        layout.addWidget(action_box)
+
+        # Buttons
+        btn_row = QHBoxLayout()
+        btn_apply = QPushButton("✅ Apply to Selected Order")
+        btn_apply.setStyleSheet(
+            "background: #059669; color: white; padding: 10px 20px; border-radius: 6px; font-weight: 700; font-size: 13px;"
+        )
+        btn_close = QPushButton("Close")
+        btn_close.setStyleSheet("padding: 10px 20px;")
+        btn_row.addStretch()
+        btn_row.addWidget(btn_apply)
+        btn_row.addWidget(btn_close)
+        layout.addLayout(btn_row)
+
+        btn_close.clicked.connect(dlg.reject)
+
+        def do_search():
+            query = search_input.text().strip()
+            if not query:
+                return
+
+            try:
+                db_path = self.orders_db_file
+                if not db_path:
+                    conn = get_connection("orders.db", folder_path=self.folder_path)
+                else:
+                    conn = sqlite3.connect(db_path)
+                cur = conn.cursor()
+
+                # Search by order id number or patient name
+                try:
+                    order_num = int(query.replace("ORD-", "").replace("ORD", "").split("-")[0].strip())
+                    cur.execute("""
+                        SELECT o.id, o.patient_last_name, o.patient_first_name, o.rx_date,
+                               o.order_status, COALESCE(o.refill_number, 0),
+                               (SELECT GROUP_CONCAT(CAST(COALESCE(oi.refills, '0') AS INTEGER))
+                                FROM order_items oi WHERE oi.order_id = o.id) AS item_refills,
+                               COALESCE(o.is_locked, 0), COALESCE(o.refill_completed, 0)
+                        FROM orders o
+                        WHERE o.id = ? OR o.parent_order_id = ?
+                        ORDER BY o.id ASC
+                    """, (order_num, order_num))
+                except ValueError:
+                    order_num = None
+                    cur.execute("""
+                        SELECT o.id, o.patient_last_name, o.patient_first_name, o.rx_date,
+                               o.order_status, COALESCE(o.refill_number, 0),
+                               (SELECT GROUP_CONCAT(CAST(COALESCE(oi.refills, '0') AS INTEGER))
+                                FROM order_items oi WHERE oi.order_id = o.id) AS item_refills,
+                               COALESCE(o.is_locked, 0), COALESCE(o.refill_completed, 0)
+                        FROM orders o
+                        WHERE UPPER(o.patient_last_name) LIKE UPPER(?) OR UPPER(o.patient_first_name) LIKE UPPER(?)
+                        ORDER BY o.patient_last_name, o.id ASC
+                        LIMIT 50
+                    """, (f"%{query}%", f"%{query}%"))
+
+                rows = cur.fetchall()
+                conn.close()
+
+                results_table.setSortingEnabled(False)
+                results_table.setRowCount(len(rows))
+                for r, (oid, lname, fname, rx_date, status, rno, item_refills, locked, completed) in enumerate(rows):
+                    patient = f"{lname or ''}, {fname or ''}".strip(", ")
+                    rno_int = int(rno or 0)
+                    if rno_int > 0:
+                        display = f"ORD-{oid:03d}-R{rno_int}"
+                    else:
+                        display = f"ORD-{oid:03d}"
+
+                    results_table.setItem(r, 0, QTableWidgetItem(display))
+                    results_table.setItem(r, 1, QTableWidgetItem(patient))
+                    results_table.setItem(r, 2, QTableWidgetItem(rx_date or ""))
+                    results_table.setItem(r, 3, QTableWidgetItem(status or "Pending"))
+                    results_table.setItem(r, 4, QTableWidgetItem(str(rno_int)))
+                    results_table.setItem(r, 5, QTableWidgetItem(item_refills or "0"))
+                    results_table.setItem(r, 6, QTableWidgetItem("🔒 Yes" if locked else "No"))
+                    results_table.setItem(r, 7, QTableWidgetItem("✅ Yes" if completed else "No"))
+                    results_table.item(r, 0).setData(Qt.ItemDataRole.UserRole, oid)
+
+                    # Highlight locked/completed rows
+                    if locked or completed:
+                        for c in range(8):
+                            it = results_table.item(r, c)
+                            if it:
+                                it.setBackground(QColor("#FEF3C7"))
+
+                results_table.setSortingEnabled(True)
+                try:
+                    results_table.resizeColumnsToContents()
+                except Exception:
+                    pass
+
+            except Exception as e:
+                QMessageBox.warning(dlg, "Search Error", f"Failed to search orders:\n\n{e}")
+
+        def do_apply():
+            row = results_table.currentRow()
+            if row < 0:
+                QMessageBox.warning(dlg, "No Selection", "Please select an order from the search results.")
+                return
+            item = results_table.item(row, 0)
+            if not item:
+                return
+            oid = item.data(Qt.ItemDataRole.UserRole)
+            display = item.text()
+
+            try:
+                db_path = self.orders_db_file
+                if not db_path:
+                    conn = get_connection("orders.db", folder_path=self.folder_path)
+                else:
+                    conn = sqlite3.connect(db_path)
+                cur = conn.cursor()
+
+                if rb_unlock.isChecked():
+                    # UNLOCK: clear refill_completed and is_locked
+                    confirm = QMessageBox.question(
+                        dlg, "Confirm Unlock",
+                        f"Unlock {display}?\n\n"
+                        "This will clear the refill_completed and is_locked flags,\n"
+                        "allowing this order to be refilled again.",
+                        QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                        QMessageBox.StandardButton.Yes,
+                    )
+                    if confirm != QMessageBox.StandardButton.Yes:
+                        conn.close()
+                        return
+                    cur.execute(
+                        "UPDATE orders SET refill_completed = 0, refill_completed_at = NULL, is_locked = 0 WHERE id = ?",
+                        (oid,),
+                    )
+                    conn.commit()
+                    conn.close()
+                    QMessageBox.information(dlg, "Unlocked", f"{display} has been unlocked and can now be refilled.")
+                else:
+                    # MARK AS FULLY REFILLED: set flags
+                    confirm = QMessageBox.question(
+                        dlg, "Confirm Mark Complete",
+                        f"Mark {display} as fully refilled?\n\n"
+                        "This will set refill_completed = 1 and is_locked = 1,\n"
+                        "removing it from the refill queue.",
+                        QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                        QMessageBox.StandardButton.Yes,
+                    )
+                    if confirm != QMessageBox.StandardButton.Yes:
+                        conn.close()
+                        return
+                    cur.execute(
+                        "UPDATE orders SET refill_completed = 1, refill_completed_at = datetime('now'), is_locked = 1 WHERE id = ?",
+                        (oid,),
+                    )
+                    conn.commit()
+                    conn.close()
+                    QMessageBox.information(dlg, "Marked Complete", f"{display} has been marked as fully refilled.")
+
+                # Refresh search results
+                do_search()
+                # Refresh main queue
+                self.refresh_queue()
+
+            except Exception as e:
+                QMessageBox.critical(dlg, "Error", f"Failed to update order:\n\n{e}")
+
+        search_btn.clicked.connect(do_search)
+        search_input.returnPressed.connect(do_search)
+        btn_apply.clicked.connect(do_apply)
+
+        dlg.exec()
